@@ -124,6 +124,20 @@ class MockRelayAPI implements IRelayAPI {
     const batch = relayBatchPresence(this.db, agents);
     return { ok: true, status: 200, data: batch };
   }
+
+  // Admin stubs — not tested in client.test.ts
+  async createBroadcast(): Promise<RelayResponse<{ broadcastId: string }>> {
+    return { ok: false, status: 403, error: 'Not admin' };
+  }
+  async listBroadcasts(): Promise<RelayResponse<import('../relay-api.js').RelayBroadcast[]>> {
+    return { ok: true, status: 200, data: [] };
+  }
+  async approveAgent(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not admin' };
+  }
+  async revokeAgent(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not admin' };
+  }
 }
 
 interface TestEnv {

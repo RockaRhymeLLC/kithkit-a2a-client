@@ -20,6 +20,7 @@
  */
 
 export { CC4MeNetwork } from './client.js';
+export type { DeliverFn, CC4MeNetworkEvents, CC4MeNetworkInternalOptions } from './client.js';
 export type {
   CC4MeNetworkOptions,
   SendResult,
@@ -29,4 +30,17 @@ export type {
   DeliveryStatus,
   PresenceInfo,
   DeliveryReport,
+  Contact,
+  WireEnvelope,
 } from './types.js';
+
+// Relay API (for custom implementations / testing)
+export { HttpRelayAPI } from './relay-api.js';
+export type {
+  IRelayAPI,
+  RelayResponse,
+  RelayContact,
+  RelayPendingRequest,
+  RelayPresence,
+  RelayBroadcast,
+} from './relay-api.js';
