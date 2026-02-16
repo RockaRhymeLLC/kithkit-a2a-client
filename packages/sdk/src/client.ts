@@ -1,12 +1,11 @@
 /**
  * CC4MeNetwork — main SDK client.
  *
- * Handles contacts, presence, local cache, and lifecycle.
- * Messaging (send/receive) is implemented in s-p10b.
+ * Handles contacts, presence, local cache, lifecycle, and P2P encrypted messaging.
  */
 
 import { EventEmitter } from 'node:events';
-import { createPublicKey, type KeyObject } from 'node:crypto';
+import { createPrivateKey, type KeyObject } from 'node:crypto';
 import type {
   CC4MeNetworkOptions,
   SendResult,
@@ -17,12 +16,12 @@ import type {
   PresenceInfo,
   DeliveryReport,
   Contact,
+  WireEnvelope,
 } from './types.js';
 import {
   HttpRelayAPI,
   type IRelayAPI,
   type RelayContact,
-  type RelayPresence,
 } from './relay-api.js';
 import {
   loadCache,
@@ -31,6 +30,15 @@ import {
   type CacheData,
   type CachedContact,
 } from './cache.js';
+import { RetryQueue } from './retry.js';
+import {
+  buildEnvelope,
+  processEnvelope,
+  httpDeliver,
+} from './messaging.js';
+
+/** Delivery function signature: POST envelope to endpoint, return success. */
+export type DeliverFn = (endpoint: string, envelope: WireEnvelope) => Promise<boolean>;
 
 export interface CC4MeNetworkEvents {
   message: [msg: Message];
@@ -42,15 +50,24 @@ export interface CC4MeNetworkEvents {
 export interface CC4MeNetworkInternalOptions extends CC4MeNetworkOptions {
   /** Injectable relay API (for testing). If not provided, uses HttpRelayAPI. */
   relayAPI?: IRelayAPI;
+  /** Injectable delivery function (for testing). If not provided, uses HTTP POST. */
+  deliverFn?: DeliverFn;
+  /** Custom retry delays in ms (for testing). Default: [10000, 30000, 90000]. */
+  retryDelays?: number[];
+  /** Custom retry process interval in ms (for testing). Default: 1000. */
+  retryProcessInterval?: number;
 }
 
 export class CC4MeNetwork extends EventEmitter {
   private options: Required<CC4MeNetworkOptions>;
   private started = false;
   private relayAPI: IRelayAPI;
+  private privateKeyObj: KeyObject;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private cache: CacheData | null = null;
   private cachePath: string;
+  private retryQueue: RetryQueue;
+  private deliverFn: DeliverFn;
 
   constructor(options: CC4MeNetworkInternalOptions) {
     super();
@@ -62,15 +79,60 @@ export class CC4MeNetwork extends EventEmitter {
     };
     this.cachePath = getCachePath(this.options.dataDir);
 
+    // Convert Buffer (PKCS8 DER) to KeyObject
+    this.privateKeyObj = createPrivateKey({
+      key: Buffer.from(this.options.privateKey),
+      format: 'der',
+      type: 'pkcs8',
+    });
+
     // Use injected relay API or create HTTP client
     this.relayAPI = options.relayAPI || new HttpRelayAPI(
       this.options.relayUrl,
       this.options.username,
-      this.options.privateKey as unknown as KeyObject,
+      this.privateKeyObj,
     );
+
+    // Delivery function: injectable for testing, defaults to HTTP POST
+    this.deliverFn = options.deliverFn || httpDeliver;
+
+    // Retry queue with configurable timing
+    this.retryQueue = new RetryQueue(
+      this.options.retryQueueMax,
+      options.retryDelays,
+      options.retryProcessInterval,
+    );
+
+    // Wire retry queue's send function
+    this.retryQueue.setSendFn(async (msg) => {
+      const contact = this.getCachedContact(msg.recipient);
+      if (!contact) return false;
+
+      const presence = await this.checkPresence(msg.recipient);
+      if (!presence.online) return false;
+
+      const endpoint = presence.endpoint || contact.endpoint;
+      if (!endpoint) return false;
+
+      const envelope = buildEnvelope({
+        sender: this.options.username,
+        recipient: msg.recipient,
+        payload: msg.payload,
+        senderPrivateKey: this.privateKeyObj,
+        recipientPublicKeyBase64: contact.publicKey,
+        messageId: msg.messageId,
+      });
+
+      return this.deliverFn(endpoint, envelope);
+    });
+
+    // Forward retry queue delivery-status events
+    this.retryQueue.on('delivery-status', (status: DeliveryStatus) => {
+      this.emit('delivery-status', status);
+    });
   }
 
-  /** Start the network client (loads cache, begins heartbeat). */
+  /** Start the network client (loads cache, begins heartbeat, starts retry queue). */
   async start(): Promise<void> {
     if (this.started) return;
 
@@ -90,6 +152,9 @@ export class CC4MeNetwork extends EventEmitter {
       this.sendHeartbeat().catch(() => { /* relay temporarily unreachable */ });
     }, this.options.heartbeatInterval);
 
+    // Start retry queue processing
+    this.retryQueue.start();
+
     this.started = true;
   }
 
@@ -102,6 +167,9 @@ export class CC4MeNetwork extends EventEmitter {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+
+    // Stop retry queue
+    this.retryQueue.stop();
 
     // Flush cache
     if (this.cache) {
@@ -224,11 +292,118 @@ export class CC4MeNetwork extends EventEmitter {
     return { agent: username, online: false, lastSeen: '' };
   }
 
-  // --- Messaging (implemented in s-p10b) ---
+  // --- Messaging ---
 
+  /**
+   * Send an encrypted message to a contact.
+   *
+   * Flow:
+   * 1. Verify recipient is a contact
+   * 2. Check presence — if offline, queue for retry
+   * 3. Build encrypted envelope (X25519 ECDH + AES-256-GCM, Ed25519 signed)
+   * 4. Deliver to recipient's endpoint
+   * 5. If delivery fails, queue for retry
+   */
   async send(to: string, payload: Record<string, unknown>): Promise<SendResult> {
-    void to; void payload;
-    return { status: 'failed', messageId: '', error: 'Not implemented — see s-p10b' };
+    // Check: must be a contact
+    let contact = this.getCachedContact(to);
+    if (!contact) {
+      // Try refreshing from relay
+      await this.refreshContactsFromRelay();
+      contact = this.getCachedContact(to);
+      if (!contact) {
+        return { status: 'failed', messageId: '', error: 'Not a contact' };
+      }
+    }
+
+    if (!contact.publicKey) {
+      return { status: 'failed', messageId: '', error: 'Contact has no public key' };
+    }
+
+    // Build encrypted, signed envelope
+    const envelope = buildEnvelope({
+      sender: this.options.username,
+      recipient: to,
+      payload,
+      senderPrivateKey: this.privateKeyObj,
+      recipientPublicKeyBase64: contact.publicKey,
+    });
+
+    // Check presence
+    const presence = await this.checkPresence(to);
+
+    if (!presence.online) {
+      // Offline — queue for retry
+      const queued = this.retryQueue.enqueue(envelope.messageId, to, payload);
+      if (queued) {
+        return { status: 'queued', messageId: envelope.messageId };
+      }
+      return { status: 'failed', messageId: envelope.messageId, error: 'Retry queue full' };
+    }
+
+    // Online — try direct delivery
+    const endpoint = presence.endpoint || contact.endpoint;
+    if (!endpoint) {
+      return { status: 'failed', messageId: envelope.messageId, error: 'No endpoint for recipient' };
+    }
+
+    const delivered = await this.deliverFn(endpoint, envelope);
+    if (delivered) {
+      return { status: 'delivered', messageId: envelope.messageId };
+    }
+
+    // Delivery failed — queue for retry
+    const queued = this.retryQueue.enqueue(envelope.messageId, to, payload);
+    if (queued) {
+      return { status: 'queued', messageId: envelope.messageId };
+    }
+    return { status: 'failed', messageId: envelope.messageId, error: 'Delivery failed and retry queue full' };
+  }
+
+  /**
+   * Process an incoming message envelope.
+   *
+   * Verifies the sender is a contact, checks Ed25519 signature,
+   * decrypts AES-256-GCM payload, and emits 'message' event.
+   *
+   * Returns null if the message is not addressed to this agent.
+   * Throws on non-contact sender, invalid signature, or decryption failure.
+   */
+  receiveMessage(envelope: WireEnvelope): Message {
+    // Validate it's addressed to us
+    if (envelope.recipient !== this.options.username) {
+      throw new Error(`Message not addressed to us (to: ${envelope.recipient})`);
+    }
+
+    // Check sender is a contact
+    const contact = this.getCachedContact(envelope.sender);
+    if (!contact) {
+      throw new Error(`Sender '${envelope.sender}' is not a contact`);
+    }
+
+    if (!contact.publicKey) {
+      throw new Error(`No public key for sender '${envelope.sender}'`);
+    }
+
+    // Verify signature + decrypt
+    const processed = processEnvelope({
+      envelope,
+      recipientPrivateKey: this.privateKeyObj,
+      senderPublicKeyBase64: contact.publicKey,
+    });
+
+    const msg: Message = {
+      sender: processed.sender,
+      messageId: processed.messageId,
+      timestamp: processed.timestamp,
+      payload: processed.payload,
+      verified: processed.verified,
+    };
+
+    // Emit event
+    this.emit('message', msg);
+
+    return msg;
   }
 
   // --- Admin (implemented later) ---

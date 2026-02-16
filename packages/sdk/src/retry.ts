@@ -8,7 +8,7 @@
 import { EventEmitter } from 'node:events';
 import type { DeliveryStatus } from './types.js';
 
-interface QueuedMessage {
+export interface QueuedMessage {
   messageId: string;
   recipient: string;
   payload: Record<string, unknown>;
@@ -18,18 +18,23 @@ interface QueuedMessage {
   nextRetryAt: number;
 }
 
-const RETRY_DELAYS = [10_000, 30_000, 90_000]; // 10s, 30s, 90s
+const DEFAULT_RETRY_DELAYS = [10_000, 30_000, 90_000]; // 10s, 30s, 90s
+const DEFAULT_PROCESS_INTERVAL = 1000; // 1s
 const MAX_AGE = 60 * 60 * 1000; // 1 hour
 
 export class RetryQueue extends EventEmitter {
   private queue: Map<string, QueuedMessage> = new Map();
   private timer: ReturnType<typeof setInterval> | null = null;
   private maxSize: number;
+  private retryDelays: number[];
+  private processInterval: number;
   private sendFn: ((msg: QueuedMessage) => Promise<boolean>) | null = null;
 
-  constructor(maxSize = 100) {
+  constructor(maxSize = 100, retryDelays?: number[], processInterval?: number) {
     super();
     this.maxSize = maxSize;
+    this.retryDelays = retryDelays || DEFAULT_RETRY_DELAYS;
+    this.processInterval = processInterval || DEFAULT_PROCESS_INTERVAL;
   }
 
   /** Set the send function that will be called on retry. */
@@ -49,7 +54,7 @@ export class RetryQueue extends EventEmitter {
       status: 'pending',
       attempts: 0,
       createdAt: now,
-      nextRetryAt: now + RETRY_DELAYS[0]!,
+      nextRetryAt: now + this.retryDelays[0]!,
     });
 
     this.emitStatus(messageId, 'pending', 0);
@@ -77,7 +82,7 @@ export class RetryQueue extends EventEmitter {
 
   private ensureTimer(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => this.process(), 1000);
+    this.timer = setInterval(() => this.process(), this.processInterval);
   }
 
   private async process(): Promise<void> {
@@ -106,13 +111,13 @@ export class RetryQueue extends EventEmitter {
         msg.status = 'delivered';
         this.emitStatus(id, 'delivered', msg.attempts);
         this.queue.delete(id);
-      } else if (msg.attempts >= RETRY_DELAYS.length) {
+      } else if (msg.attempts >= this.retryDelays.length) {
         msg.status = 'failed';
         this.emitStatus(id, 'failed', msg.attempts);
         this.queue.delete(id);
       } else {
         msg.status = 'pending';
-        msg.nextRetryAt = now + RETRY_DELAYS[msg.attempts]!;
+        msg.nextRetryAt = now + this.retryDelays[msg.attempts]!;
       }
     }
 
