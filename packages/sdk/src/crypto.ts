@@ -5,8 +5,8 @@
  */
 
 import {
-  createSign,
-  createVerify,
+  sign as cryptoSign,
+  verify as cryptoVerify,
   createHash,
   hkdfSync,
   randomBytes,
@@ -165,19 +165,34 @@ export function decrypt(
 }
 
 /**
+ * Extract raw Ed25519 key bytes from a KeyObject.
+ * Returns the 32-byte seed (private) and 32-byte public key.
+ */
+export function getEd25519RawKeys(privateKey: KeyObject): { seed: Buffer; publicKeyRaw: Buffer } {
+  // PKCS8 DER for Ed25519: 48 bytes total, seed starts at offset 16
+  const pkcs8 = privateKey.export({ type: 'pkcs8', format: 'der' });
+  const seed = Buffer.from(pkcs8.subarray(16, 48));
+
+  // Derive public key and get raw bytes
+  const pubKeyObj = createPublicKey(privateKey);
+  const spki = pubKeyObj.export({ type: 'spki', format: 'der' });
+  // SPKI DER for Ed25519: 44 bytes total, raw key starts at offset 12
+  const publicKeyRaw = Buffer.from(spki.subarray(12, 44));
+
+  return { seed, publicKeyRaw };
+}
+
+/**
  * Sign data with Ed25519.
+ * Ed25519 uses its own built-in hash (SHA-512), so algorithm is null.
  */
 export function sign(data: Buffer, privateKey: KeyObject): Buffer {
-  const signer = createSign('Ed25519');
-  signer.update(data);
-  return signer.sign({ key: privateKey });
+  return Buffer.from(cryptoSign(null, data, privateKey));
 }
 
 /**
  * Verify Ed25519 signature.
  */
 export function verify(data: Buffer, signature: Buffer, publicKey: KeyObject): boolean {
-  const verifier = createVerify('Ed25519');
-  verifier.update(data);
-  return verifier.verify({ key: publicKey }, signature);
+  return cryptoVerify(null, data, publicKey, signature);
 }
