@@ -50,6 +50,12 @@ import {
   transferOwnership,
 } from './routes/groups.js';
 import { v1Send, v1Inbox, v1Ack, isSunset } from './routes/v1-compat.js';
+import { handleVerifySend, handleVerifyConfirm } from './routes/verify.js';
+import { sesSender } from './ses-sender.js';
+import type { EmailSender } from './email.js';
+
+// Email sender — use SES in production, can be overridden via env
+const emailSender: EmailSender = sesSender;
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const DB_PATH = process.env.DB_PATH || './data/relay.db';
@@ -137,6 +143,27 @@ const server = createServer(async (req, res) => {
         return null;
       }
     };
+
+    // ==========================================================
+    // VERIFICATION ROUTES (unauthenticated)
+    // ==========================================================
+
+    // POST /verify/send — request verification code
+    if (path === '/verify/send' && method === 'POST') {
+      const data = parseBody();
+      if (!data) return json(res, 400, { error: 'Invalid JSON' });
+      const ip = (req.headers['x-forwarded-for'] as string || req.socket.remoteAddress || '').split(',')[0].trim();
+      const result = await handleVerifySend(db, data, emailSender, ip);
+      return json(res, result.status || (result.ok ? 200 : 400), result);
+    }
+
+    // POST /verify/confirm — submit verification code
+    if (path === '/verify/confirm' && method === 'POST') {
+      const data = parseBody();
+      if (!data) return json(res, 400, { error: 'Invalid JSON' });
+      const result = handleVerifyConfirm(db, data);
+      return json(res, result.status || (result.ok ? 200 : 400), result);
+    }
 
     // ==========================================================
     // REGISTRY ROUTES
