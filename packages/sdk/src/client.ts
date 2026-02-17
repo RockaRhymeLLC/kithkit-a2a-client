@@ -92,8 +92,11 @@ export class CC4MeNetwork extends EventEmitter {
   private retryQueue: RetryQueue;
   private deliverFn: DeliverFn;
   private deliveryReports: Map<string, DeliveryReport> = new Map();
+  private static MAX_DELIVERY_REPORTS = 500;
   private seenBroadcastIds: Set<string> = new Set();
+  private static MAX_SEEN_BROADCAST_IDS = 1000;
   private seenContactRequestIds: Set<string> = new Set();
+  private static MAX_SEEN_CONTACT_REQUEST_IDS = 500;
   private memberCache: Map<string, { members: RelayGroupMember[]; fetchedAt: number }> = new Map();
   private static MEMBER_CACHE_TTL = 60_000; // 60s staleness threshold
   private seenGroupMessageIds: Set<string> = new Set();
@@ -109,12 +112,15 @@ export class CC4MeNetwork extends EventEmitter {
     };
     this.cachePath = getCachePath(this.options.dataDir);
 
-    // Convert Buffer (PKCS8 DER) to KeyObject
+    // Convert Buffer (PKCS8 DER) to KeyObject and validate key type
     this.privateKeyObj = createPrivateKey({
       key: Buffer.from(this.options.privateKey),
       format: 'der',
       type: 'pkcs8',
     });
+    if (this.privateKeyObj.asymmetricKeyType !== 'ed25519') {
+      throw new Error(`Expected Ed25519 private key, got '${this.privateKeyObj.asymmetricKeyType}'`);
+    }
 
     // Use injected relay API or create HTTP client
     this.relayAPI = options.relayAPI || new HttpRelayAPI(
@@ -521,6 +527,10 @@ export class CC4MeNetwork extends EventEmitter {
       for (const b of result.data) {
         if (this.seenBroadcastIds.has(b.id)) continue;
         this.seenBroadcastIds.add(b.id);
+        if (this.seenBroadcastIds.size > CC4MeNetwork.MAX_SEEN_BROADCAST_IDS) {
+          const first = this.seenBroadcastIds.values().next().value;
+          if (first) this.seenBroadcastIds.delete(first);
+        }
 
         const broadcast: Broadcast = {
           type: b.type,
@@ -550,6 +560,10 @@ export class CC4MeNetwork extends EventEmitter {
     for (const req of requests) {
       if (this.seenContactRequestIds.has(req.from)) continue;
       this.seenContactRequestIds.add(req.from);
+      if (this.seenContactRequestIds.size > CC4MeNetwork.MAX_SEEN_CONTACT_REQUEST_IDS) {
+        const first = this.seenContactRequestIds.values().next().value;
+        if (first) this.seenContactRequestIds.delete(first);
+      }
       newRequests.push(req);
       this.emit('contact-request', req);
     }
@@ -710,12 +724,14 @@ export class CC4MeNetwork extends EventEmitter {
         return;
       }
 
-      // Deliver with 5s timeout
+      // Deliver with 5s timeout (clear timer to avoid leak)
       try {
+        let timer: ReturnType<typeof setTimeout>;
         const success = await Promise.race([
           this.deliverFn(endpoint, envelope),
-          new Promise<false>(resolve => setTimeout(() => resolve(false), 5000)),
+          new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 5000); }),
         ]);
+        clearTimeout(timer!);
         if (success) {
           result.delivered.push(member.agent);
         } else {
@@ -866,6 +882,11 @@ export class CC4MeNetwork extends EventEmitter {
       attempts: [],
       finalStatus: 'failed',
     });
+    // Evict oldest reports to prevent unbounded growth
+    if (this.deliveryReports.size > CC4MeNetwork.MAX_DELIVERY_REPORTS) {
+      const first = this.deliveryReports.keys().next().value;
+      if (first) this.deliveryReports.delete(first);
+    }
   }
 
   /** Record a delivery attempt. */
