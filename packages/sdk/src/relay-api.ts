@@ -162,6 +162,7 @@ export class HttpRelayAPI implements IRelayAPI {
       const headers: Record<string, string> = {
         'Authorization': authHeader,
         'X-Timestamp': timestamp,
+        'Connection': 'close',
       };
       if (bodyStr) headers['Content-Type'] = 'application/json';
 
@@ -170,6 +171,7 @@ export class HttpRelayAPI implements IRelayAPI {
           method,
           headers,
           body: bodyStr || undefined,
+          signal: AbortSignal.timeout(10_000),
         });
         const text = await res.text();
         let data: T;
@@ -192,7 +194,8 @@ export class HttpRelayAPI implements IRelayAPI {
           await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
           continue;
         }
-        return { ok: false, status: 0, error: err.message };
+        const detail = err.cause?.message ? ` (${err.cause.message})` : '';
+        return { ok: false, status: 0, error: `${err.message}${detail}` };
       }
     }
     return { ok: false, status: 0, error: 'Max retries exceeded' };

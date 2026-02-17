@@ -186,10 +186,12 @@ export class CC4MeNetwork extends EventEmitter {
     // Send initial heartbeat
     await this.sendHeartbeat();
 
-    // Start heartbeat timer
-    this.heartbeatTimer = setInterval(() => {
-      this.sendHeartbeat().catch(() => { /* relay temporarily unreachable */ });
-    }, this.options.heartbeatInterval);
+    // Start heartbeat timer (skip if interval is 0 or negative)
+    if (this.options.heartbeatInterval > 0) {
+      this.heartbeatTimer = setInterval(() => {
+        this.sendHeartbeat().catch(() => { /* relay temporarily unreachable */ });
+      }, this.options.heartbeatInterval);
+    }
 
     // Start retry queue processing
     this.retryQueue.start();
