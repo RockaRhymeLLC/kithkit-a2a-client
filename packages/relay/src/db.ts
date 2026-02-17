@@ -13,9 +13,9 @@ let _db: Database.Database | null = null;
 let _dbPath: string | null = null;
 
 /**
- * V2 schema version. Increment when schema changes.
+ * Current schema version. Increment when schema changes.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /**
  * Full v2 schema DDL.
@@ -117,6 +117,46 @@ const V2_SCHEMA = `
 `;
 
 /**
+ * V3 additive schema — group messaging tables.
+ * No changes to existing Phase 1/v2 tables.
+ */
+const V3_GROUPS_SCHEMA = `
+  -- Groups — named collections of agents
+  CREATE TABLE IF NOT EXISTS groups (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    status TEXT DEFAULT 'active' CHECK(status IN ('active', 'dissolved')),
+    members_can_invite INTEGER DEFAULT 0,
+    members_can_send INTEGER DEFAULT 1,
+    max_members INTEGER DEFAULT 50,
+    created_at TEXT DEFAULT (datetime('now')),
+    dissolved_at TEXT,
+    FOREIGN KEY (owner) REFERENCES agents(name)
+  );
+
+  -- Group memberships — which agents belong to which groups
+  CREATE TABLE IF NOT EXISTS group_memberships (
+    group_id TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    role TEXT DEFAULT 'member' CHECK(role IN ('owner', 'admin', 'member')),
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'active', 'removed', 'left')),
+    invited_by TEXT,
+    greeting TEXT,
+    joined_at TEXT,
+    left_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, agent),
+    FOREIGN KEY (group_id) REFERENCES groups(id),
+    FOREIGN KEY (agent) REFERENCES agents(name),
+    FOREIGN KEY (invited_by) REFERENCES agents(name)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_memberships_agent ON group_memberships(agent);
+  CREATE INDEX IF NOT EXISTS idx_memberships_status ON group_memberships(status);
+`;
+
+/**
  * Initialize a new database at the given path with v2 schema.
  * Returns the database instance.
  */
@@ -130,8 +170,9 @@ export function initializeDatabase(dbPath: string): Database.Database {
   db.pragma('journal_mode = DELETE'); // Safe on all filesystems
   db.pragma('foreign_keys = ON');
 
-  // Apply schema
+  // Apply schema (additive — v2 base + v3 groups)
   db.exec(V2_SCHEMA);
+  db.exec(V3_GROUPS_SCHEMA);
 
   // Track schema version
   db.exec(`

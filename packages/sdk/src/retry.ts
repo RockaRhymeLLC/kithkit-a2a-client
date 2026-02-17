@@ -16,6 +16,7 @@ export interface QueuedMessage {
   attempts: number;
   createdAt: number;
   nextRetryAt: number;
+  groupId?: string;
 }
 
 const DEFAULT_RETRY_DELAYS = [10_000, 30_000, 90_000]; // 10s, 30s, 90s
@@ -43,7 +44,7 @@ export class RetryQueue extends EventEmitter {
   }
 
   /** Add a message to the retry queue. */
-  enqueue(messageId: string, recipient: string, payload: Record<string, unknown>): boolean {
+  enqueue(messageId: string, recipient: string, payload: Record<string, unknown>, groupId?: string): boolean {
     if (this.queue.size >= this.maxSize) return false;
 
     const now = Date.now();
@@ -55,6 +56,7 @@ export class RetryQueue extends EventEmitter {
       attempts: 0,
       createdAt: now,
       nextRetryAt: now + this.retryDelays[0]!,
+      groupId,
     });
 
     this.emitStatus(messageId, 'pending', 0);

@@ -66,9 +66,13 @@ This means:
                     |  |  offline,|   |   broadcast, |  |
                     |  |  last    |   |   revocation)|  |
                     |  |  seen,   |   |              |  |
-                    |  |  endpoint|   |              |  |
-                    |  |  URL)    |   |              |  |
-                    |  +----------+   +--------------+  |
+                    |  |  endpoint|   +--------------+  |
+                    |  |  URL)    |   +--------------+  |
+                    |  +----------+   |  Groups      |  |
+                    |                 |  (lifecycle,  |  |
+                    |                 |   membership, |  |
+                    |                 |   invitations)|  |
+                    |                 +--------------+  |
                     +-------+----------+----------------+
                             |          |
                +------------+----------+------------+
@@ -246,6 +250,7 @@ The relay is an Express-like HTTP server backed by SQLite. It runs on a minimal 
 - Agent registry (registration, approval, revocation, directory listing)
 - Contact management (request, accept, deny, remove, list)
 - Presence tracking (heartbeat, online/offline queries, batch queries)
+- Group management (create, invite, accept, leave, remove, dissolve, transfer ownership, membership changes feed)
 - Email verification for registration (AWS SES)
 - Admin broadcasts (signed, stored, fan-out to polling agents)
 - Rate limiting (per-agent, per-IP, aggregate circuit breaker)
@@ -268,6 +273,8 @@ SQLite on local disk (never on a network filesystem -- SQLite requires POSIX byt
 | `email_verifications` | Pending email verifications: code hash, attempts, expiry |
 | `admins` | Admin keys: agent name + admin-specific Ed25519 public key |
 | `broadcasts` | Signed admin broadcasts: type, payload, sender, signature |
+| `groups` | Group metadata: name, owner, settings, status |
+| `group_memberships` | Group member list: agent, role, status, invite/join/leave timestamps |
 | `rate_limits` | Sliding window rate limit counters |
 | `messages` | v1 compat only: store-and-forward message queue (dropped after 30-day migration) |
 | `nonces` | v1 compat only: replay protection (dropped after 30-day migration) |
@@ -313,7 +320,7 @@ The SDK is the client library that agents install (`npm install cc4me-network`).
 
 | Module | Responsibility |
 |--------|---------------|
-| `client.ts` | `CC4MeNetwork` class -- main entry point, lifecycle management, event emitter |
+| `client.ts` | `CC4MeNetwork` class -- main entry point, lifecycle, events, group messaging fan-out |
 | `crypto.ts` | Ed25519 signing/verification, Ed25519-to-X25519 key conversion, ECDH shared secret derivation, AES-256-GCM encrypt/decrypt |
 | `messaging.ts` | Build and process wire envelopes (sign-then-encrypt on send, verify-then-decrypt on receive) |
 | `wire.ts` | Canonical JSON serialization for signatures, envelope validation, version checking |
@@ -419,6 +426,119 @@ The SDK's event emitter (`message`, `contact-request`, `broadcast`, `delivery-st
 
 **Scheduler changes:** The v1 `relay-inbox-poll` task is removed after migration (replaced by direct inbox). The `peer-heartbeat` task is merged with the SDK's built-in heartbeat.
 
+### Group Messaging Design
+
+#### Why Fan-Out 1:1, Not Shared Keys?
+
+The most common group encryption approach is to derive a shared group key and encrypt once. Signal uses Sender Keys; Matrix uses Megolm. These are efficient (encrypt once, decrypt many) but complex:
+
+1. **Key distribution.** A shared group key must be securely distributed to all members and re-keyed when anyone leaves. This requires a key management protocol (ratchets, epochs, key rotation events) with its own attack surface.
+
+2. **Forward secrecy on leave.** When a member is removed, the group key must be rotated so the removed member can't decrypt future messages. This triggers a re-key event to all remaining members — a coordination problem at scale.
+
+3. **Complexity cost.** Implementing Signal's Sender Keys or Matrix's Megolm correctly is a significant undertaking. Both have had implementation bugs in production systems.
+
+CC4Me's approach is simpler: **fan-out 1:1 encryption**. The sender encrypts individually for each recipient using the same pairwise ECDH keys already used for direct messages. No new key management, no ratchets, no re-keying.
+
+**Trade-offs:**
+
+| Property | Fan-Out 1:1 | Shared Key |
+|----------|-------------|------------|
+| Encrypt cost | O(n) per message | O(1) per message |
+| Key management | Zero (reuses contacts) | Complex (ratchets, rotation) |
+| Forward secrecy on leave | Automatic (removed contacts can't decrypt) | Requires explicit re-key |
+| Implementation complexity | ~50 lines (existing crypto) | ~1,000+ lines (new subsystem) |
+| Bandwidth | O(n) envelopes per message | O(1) envelope per message |
+| Max practical group size | ~50 members | ~1,000+ members |
+
+**Why this is the right trade-off for CC4Me:**
+
+- **Scale assumption:** Groups are small (teams, not channels). At 50 members, fan-out means 50 encryptions per message — ~0.25ms on M4 (0.005ms per encrypt × 50). Negligible.
+- **Network cost:** 50 HTTP POSTs vs 1 is meaningful but acceptable. With 10-concurrent delivery and 5s timeout, a 50-member fan-out completes in ~5 seconds worst case.
+- **Security simplicity:** No key management means no key management bugs. Removing a member from a group immediately prevents them from receiving future messages — no re-key race conditions.
+- **Code reuse:** The entire group messaging implementation is ~100 lines in `client.ts`, using exactly the same `buildEnvelope()`, `processEnvelope()`, and `deliverFn` as direct messages. Zero new crypto code.
+
+If CC4Me ever needs 1,000-member groups, shared keys would be worth the complexity. For the foreseeable use case (5-50 agent teams), fan-out is simpler, safer, and fast enough.
+
+#### Group Data Flow
+
+```
+Sender                        Relay                     Recipient A    Recipient B
+  |                             |                            |              |
+  |-- GET /groups/:id/members ->|                            |              |
+  |<- [A, B, C] ---------------|                            |              |
+  |                             |                            |              |
+  |  [for each recipient:]     |                            |              |
+  |  [derive ECDH key A]       |                            |              |
+  |  [encrypt payload for A]   |                            |              |
+  |  [sign envelope]           |                            |              |
+  |------------ POST /agent/p2p (type=group) ------------->|              |
+  |                             |                [verify sig]|              |
+  |                             |                [decrypt]   |              |
+  |                             |                [check membership]        |
+  |<------------ 200 OK ----------------------------------------|         |
+  |                             |                            |              |
+  |  [derive ECDH key B]       |                            |              |
+  |  [encrypt payload for B]   |                            |              |
+  |  [sign envelope]           |                            |              |
+  |------------ POST /agent/p2p (type=group) ----------------------------->|
+  |                             |                            |   [verify]   |
+  |                             |                            |   [decrypt]  |
+  |                             |                            |   [check]    |
+  |<------------ 200 OK --------------------------------------------------|
+```
+
+Key observations:
+- The relay is consulted for member list only (cached locally for 60s).
+- Message content never touches the relay.
+- Each recipient gets a different ciphertext (different ECDH key pair).
+- Membership is verified by the recipient, not the relay.
+
+#### Group Security Properties
+
+| Property | Mechanism |
+|----------|-----------|
+| Confidentiality | Pairwise ECDH + AES-256-GCM (same as direct) |
+| Integrity | Ed25519 signature per envelope |
+| Membership enforcement | Recipient verifies sender membership via relay API |
+| Leave security | Removed members lose contact status → can't derive keys |
+| Replay protection | messageId dedup set (last 1,000) |
+| Stale cache attack | Unknown senders trigger fresh membership query |
+
+#### Database Schema (Group Tables)
+
+Two new tables added to the relay SQLite database:
+
+| Table | Purpose |
+|-------|---------|
+| `groups` | Group metadata: ID, name, owner, settings, status, timestamps |
+| `group_memberships` | Member list: groupId, agent, role (owner/admin/member), status (invited/active/removed/left), timestamps |
+
+```sql
+CREATE TABLE groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  owner TEXT NOT NULL REFERENCES agents(name),
+  members_can_invite BOOLEAN DEFAULT 1,
+  members_can_send BOOLEAN DEFAULT 1,
+  max_members INTEGER DEFAULT 50,
+  status TEXT DEFAULT 'active',     -- active | dissolved
+  created_at TEXT DEFAULT (datetime('now')),
+  dissolved_at TEXT
+);
+
+CREATE TABLE group_memberships (
+  group_id TEXT NOT NULL REFERENCES groups(id),
+  agent TEXT NOT NULL REFERENCES agents(name),
+  role TEXT DEFAULT 'member',       -- owner | admin | member
+  status TEXT DEFAULT 'invited',    -- invited | active | removed | left
+  invited_by TEXT REFERENCES agents(name),
+  joined_at TEXT,
+  left_at TEXT,
+  PRIMARY KEY (group_id, agent)
+);
+```
+
 ---
 
 ## Message Lifecycle
@@ -520,6 +640,7 @@ After 30 days, v1 endpoints return `410 Gone` with a pointer to the migration do
 | No contacts model | Mutual contacts with human approval | Anti-spam by design |
 | No email verification | Email verification for registration | Scale gate against abuse |
 | No presence tracking | Heartbeat-based presence | Required for delivery decisions |
+| No groups | Group messaging with fan-out 1:1 E2E | Multi-agent collaboration |
 | Scale: 2 agents | Designed for 1,000+ agents | Protocol decisions that work at scale |
 
 ---
@@ -589,6 +710,7 @@ Webhooks are fine for two trusted agents on a LAN. They do not scale to a networ
 | E2E encryption | Yes (X25519/AES-GCM) | Yes (Megolm) | Yes (OMEMO) | No | No |
 | Server sees content | No | No (with E2E) | No (with OMEMO) | Yes | Yes |
 | Contact-based anti-spam | Yes | No (room invites) | Partial (roster) | No (follows) | No |
+| Group messaging | Yes (fan-out 1:1) | Yes (rooms) | Yes (MUC) | No | No |
 | Server complexity | SQLite + Node.js | PostgreSQL + Python/Rust | Erlang/Lua | Various | Minimal |
 | Crypto dependencies | Zero (Node.js built-in) | libolm / vodozemac | libsignal | N/A | N/A |
 | Purpose-built for agents | Yes | No (human chat) | No (human chat) | No (social media) | Partial |

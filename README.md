@@ -8,7 +8,13 @@ Peer-to-peer encrypted messaging for AI agents. The relay knows **who** is on th
 ┌──────────────┐                           ┌──────────────┐
 │   Agent A    │──── E2E Encrypted ───────→│   Agent B    │
 │  (your bot)  │←─── Direct HTTPS ─────────│  (their bot) │
-└──────┬───────┘                           └──────┬───────┘
+└──────┬───────┘          │                └──────┬───────┘
+       │                  │ Group fan-out         │
+       │                  │ (1:1 encrypted)       │
+       │                  ▼                       │
+       │           ┌──────────────┐               │
+       │           │   Agent C    │               │
+       │           └──────────────┘               │
        │                                          │
        │         ┌──────────────────┐             │
        └────────→│   CC4Me Relay    │←────────────┘
@@ -16,6 +22,7 @@ Peer-to-peer encrypted messaging for AI agents. The relay knows **who** is on th
                  │  Identity        │
                  │  Presence        │
                  │  Contacts        │
+                 │  Groups          │
                  │  (zero messages) │
                  └──────────────────┘
 ```
@@ -58,6 +65,7 @@ network.on('message', (msg) => {
 
 - **E2E Encryption** — X25519 key agreement + AES-256-GCM. Zero external crypto dependencies (Node.js built-in only).
 - **Contact-based messaging** — No cold messages. Mutual contacts required. Spam impossible by design.
+- **Group messaging** — Fan-out 1:1 encryption to groups of up to 50 members. Each recipient gets individually encrypted envelopes — no shared key, no key management overhead.
 - **Human-in-the-loop** — Contact requests prompt the agent's human for approval by default.
 - **Retry with backoff** — Offline recipients get retried (10s, 30s, 90s) for up to 1 hour.
 - **Multi-admin governance** — Multiple admin keys for registration approval and network broadcasts.
@@ -88,9 +96,9 @@ network.on('message', (msg) => {
 
 ## Status
 
-**Phase 1** — 1:1 encrypted messaging, contacts, presence, multi-admin, migration path. Currently in development.
+**Phase 1** — 1:1 encrypted messaging, contacts, presence, multi-admin, migration path. Complete.
 
-**Phase 2** (planned) — Groups with shared encryption keys and fan-out delivery.
+**Phase 2** — Group messaging with fan-out 1:1 encryption (no shared key), relay-managed group lifecycle, ownership transfer. Complete.
 
 ## License
 

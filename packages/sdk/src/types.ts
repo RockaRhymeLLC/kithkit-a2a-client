@@ -80,16 +80,34 @@ export interface Contact {
   addedAt: string;
 }
 
+export interface GroupMessage {
+  groupId: string;
+  sender: string;
+  messageId: string;
+  timestamp: string;
+  payload: Record<string, unknown>;
+  verified: boolean;
+}
+
+export interface GroupSendResult {
+  messageId: string;
+  delivered: string[];
+  queued: string[];
+  failed: string[];
+}
+
 /**
  * Wire format envelope — every P2P message uses this structure.
  */
 export interface WireEnvelope {
   version: string;
-  type: 'direct' | 'broadcast' | 'contact-request' | 'contact-response' | 'revocation' | 'receipt';
+  type: 'direct' | 'group' | 'broadcast' | 'contact-request' | 'contact-response' | 'revocation' | 'receipt';
   messageId: string;
   sender: string;
   recipient: string;
   timestamp: string;
+  /** Group ID — required for type='group', must not be present for type='direct'. */
+  groupId?: string;
   payload: {
     ciphertext?: string;
     nonce?: string;

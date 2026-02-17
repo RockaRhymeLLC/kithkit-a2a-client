@@ -34,6 +34,21 @@ import {
   createBroadcast,
   listBroadcasts,
 } from './routes/admin.js';
+import {
+  createGroup,
+  getGroupDetails,
+  inviteToGroup,
+  acceptInvitation,
+  declineInvitation,
+  leaveGroup,
+  removeMember,
+  dissolveGroup,
+  listGroups,
+  listMembers,
+  listInvitations,
+  getChanges,
+  transferOwnership,
+} from './routes/groups.js';
 import { v1Send, v1Inbox, v1Ack, isSunset } from './routes/v1-compat.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
@@ -301,6 +316,127 @@ const server = createServer(async (req, res) => {
       const type = urlObj.searchParams.get('type') || undefined;
       const limit = parseInt(urlObj.searchParams.get('limit') || '50', 10);
       return json(res, 200, listBroadcasts(db, type, limit));
+    }
+
+    // ==========================================================
+    // GROUP ROUTES
+    // ==========================================================
+
+    // GET /groups/invitations — list pending invitations (must be before /groups/:groupId)
+    if (path === '/groups/invitations' && method === 'GET') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      return json(res, 200, listInvitations(db, a.agent!));
+    }
+
+    // POST /groups — create group
+    if (path === '/groups' && method === 'POST') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const data = parseBody();
+      if (!data) return json(res, 400, { error: 'Invalid JSON' });
+      const result = createGroup(db, a.agent!, data.name, data.settings);
+      return json(res, result.status === 201 ? 201 : (typeof result.status === 'number' ? result.status : 400), result);
+    }
+
+    // GET /groups — list caller's groups
+    if (path === '/groups' && method === 'GET') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      return json(res, 200, listGroups(db, a.agent!));
+    }
+
+    // POST /groups/:groupId/invite
+    params = matchPath('/groups/:groupId/invite', path);
+    if (params && method === 'POST') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const data = parseBody();
+      if (!data) return json(res, 400, { error: 'Invalid JSON' });
+      const result = inviteToGroup(db, a.agent!, params.groupId, data.agent, data.greeting);
+      return json(res, typeof result.status === 'number' ? result.status : 200, result);
+    }
+
+    // POST /groups/:groupId/accept
+    params = matchPath('/groups/:groupId/accept', path);
+    if (params && method === 'POST') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const result = acceptInvitation(db, a.agent!, params.groupId);
+      return json(res, typeof result.status === 'number' ? result.status : 200, result);
+    }
+
+    // POST /groups/:groupId/decline
+    params = matchPath('/groups/:groupId/decline', path);
+    if (params && method === 'POST') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const result = declineInvitation(db, a.agent!, params.groupId);
+      return json(res, typeof result.status === 'number' ? result.status : 200, result);
+    }
+
+    // POST /groups/:groupId/leave
+    params = matchPath('/groups/:groupId/leave', path);
+    if (params && method === 'POST') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const result = leaveGroup(db, a.agent!, params.groupId);
+      return json(res, typeof result.status === 'number' ? result.status : 200, result);
+    }
+
+    // POST /groups/:groupId/transfer
+    params = matchPath('/groups/:groupId/transfer', path);
+    if (params && method === 'POST') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const data = parseBody();
+      if (!data) return json(res, 400, { error: 'Invalid JSON' });
+      const result = transferOwnership(db, a.agent!, params.groupId, data.newOwner);
+      return json(res, typeof result.status === 'number' ? result.status : 200, result);
+    }
+
+    // GET /groups/:groupId/members
+    params = matchPath('/groups/:groupId/members', path);
+    if (params && method === 'GET') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      return json(res, 200, listMembers(db, params.groupId, a.agent!));
+    }
+
+    // GET /groups/:groupId/changes
+    params = matchPath('/groups/:groupId/changes', path);
+    if (params && method === 'GET') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const since = urlObj.searchParams.get('since') || '1970-01-01T00:00:00Z';
+      return json(res, 200, getChanges(db, params.groupId, a.agent!, since));
+    }
+
+    // DELETE /groups/:groupId/members/:agent — remove member
+    params = matchPath('/groups/:groupId/members/:agent', path);
+    if (params && method === 'DELETE') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const result = removeMember(db, a.agent!, params.groupId, params.agent);
+      return json(res, typeof result.status === 'number' ? result.status : 200, result);
+    }
+
+    // DELETE /groups/:groupId — dissolve group
+    params = matchPath('/groups/:groupId', path);
+    if (params && method === 'DELETE') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const result = dissolveGroup(db, a.agent!, params.groupId);
+      return json(res, typeof result.status === 'number' ? result.status : 200, result);
+    }
+
+    // GET /groups/:groupId — get group details
+    params = matchPath('/groups/:groupId', path);
+    if (params && method === 'GET') {
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const result = getGroupDetails(db, params.groupId, a.agent!);
+      return json(res, typeof result.status === 'number' ? result.status : 200, result);
     }
 
     // ==========================================================

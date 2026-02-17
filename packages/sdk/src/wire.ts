@@ -36,21 +36,39 @@ export function signablePayload(envelope: WireEnvelope): string {
 
 /**
  * Validate that an envelope has all required fields and correct types.
+ *
+ * Group envelopes require groupId. Direct envelopes must not have groupId.
  */
 export function validateEnvelope(data: unknown): data is WireEnvelope {
   if (!data || typeof data !== 'object') return false;
   const obj = data as Record<string, unknown>;
-  return (
-    typeof obj.version === 'string' &&
-    typeof obj.type === 'string' &&
-    typeof obj.messageId === 'string' &&
-    typeof obj.sender === 'string' &&
-    typeof obj.recipient === 'string' &&
-    typeof obj.timestamp === 'string' &&
-    typeof obj.payload === 'object' &&
-    obj.payload !== null &&
-    typeof obj.signature === 'string'
-  );
+
+  // Base field checks
+  if (
+    typeof obj.version !== 'string' ||
+    typeof obj.type !== 'string' ||
+    typeof obj.messageId !== 'string' ||
+    typeof obj.sender !== 'string' ||
+    typeof obj.recipient !== 'string' ||
+    typeof obj.timestamp !== 'string' ||
+    typeof obj.payload !== 'object' ||
+    obj.payload === null ||
+    typeof obj.signature !== 'string'
+  ) {
+    return false;
+  }
+
+  // Group envelope: groupId required
+  if (obj.type === 'group') {
+    if (typeof obj.groupId !== 'string' || obj.groupId === '') return false;
+  }
+
+  // Direct envelope: groupId must not be present
+  if (obj.type === 'direct') {
+    if (obj.groupId !== undefined) return false;
+  }
+
+  return true;
 }
 
 /**

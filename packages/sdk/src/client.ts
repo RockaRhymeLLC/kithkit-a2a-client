@@ -5,10 +5,12 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { createPrivateKey, sign as cryptoSign, type KeyObject } from 'node:crypto';
+import { createPrivateKey, randomUUID, sign as cryptoSign, type KeyObject } from 'node:crypto';
 import type {
   CC4MeNetworkOptions,
   SendResult,
+  GroupSendResult,
+  GroupMessage,
   Message,
   ContactRequest,
   Broadcast,
@@ -23,6 +25,10 @@ import {
   type IRelayAPI,
   type RelayContact,
   type RelayBroadcast,
+  type RelayGroup,
+  type RelayGroupMember,
+  type RelayGroupInvitation,
+  type RelayGroupChange,
 } from './relay-api.js';
 import {
   loadCache,
@@ -41,11 +47,27 @@ import {
 /** Delivery function signature: POST envelope to endpoint, return success. */
 export type DeliverFn = (endpoint: string, envelope: WireEnvelope) => Promise<boolean>;
 
+export interface GroupInvitationEvent {
+  groupId: string;
+  groupName: string;
+  invitedBy: string;
+  greeting: string | null;
+}
+
+export interface GroupMemberChangeEvent {
+  groupId: string;
+  agent: string;
+  action: 'joined' | 'left' | 'removed' | 'invited' | 'ownership-transferred';
+}
+
 export interface CC4MeNetworkEvents {
   message: [msg: Message];
   'contact-request': [req: ContactRequest];
   broadcast: [broadcast: Broadcast];
   'delivery-status': [status: DeliveryStatus];
+  'group-invitation': [invitation: GroupInvitationEvent];
+  'group-member-change': [change: GroupMemberChangeEvent];
+  'group-message': [msg: GroupMessage];
 }
 
 export interface CC4MeNetworkInternalOptions extends CC4MeNetworkOptions {
@@ -72,6 +94,10 @@ export class CC4MeNetwork extends EventEmitter {
   private deliveryReports: Map<string, DeliveryReport> = new Map();
   private seenBroadcastIds: Set<string> = new Set();
   private seenContactRequestIds: Set<string> = new Set();
+  private memberCache: Map<string, { members: RelayGroupMember[]; fetchedAt: number }> = new Map();
+  private static MEMBER_CACHE_TTL = 60_000; // 60s staleness threshold
+  private seenGroupMessageIds: Set<string> = new Set();
+  private static MAX_SEEN_GROUP_MSG_IDS = 1000;
 
   constructor(options: CC4MeNetworkInternalOptions) {
     super();
@@ -129,6 +155,8 @@ export class CC4MeNetwork extends EventEmitter {
         senderPrivateKey: this.privateKeyObj,
         recipientPublicKeyBase64: contact.publicKey,
         messageId: msg.messageId,
+        type: msg.groupId ? 'group' : 'direct',
+        groupId: msg.groupId,
       });
 
       const success = await this.deliverFn(endpoint, envelope);
@@ -527,6 +555,275 @@ export class CC4MeNetwork extends EventEmitter {
     return newRequests;
   }
 
+  // --- Groups ---
+
+  /** Create a new group. Returns the group object with groupId. */
+  async createGroup(name: string, settings?: { membersCanInvite?: boolean; membersCanSend?: boolean; maxMembers?: number }): Promise<RelayGroup> {
+    const result = await this.relayAPI.createGroup(name, settings);
+    if (!result.ok || !result.data) {
+      throw new Error(result.error || 'Failed to create group');
+    }
+    return result.data;
+  }
+
+  /** Invite a contact to a group. */
+  async inviteToGroup(groupId: string, agent: string, greeting?: string): Promise<void> {
+    const result = await this.relayAPI.inviteToGroup(groupId, agent, greeting);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to invite to group');
+    }
+  }
+
+  /** Accept a group invitation. */
+  async acceptGroupInvitation(groupId: string): Promise<void> {
+    const result = await this.relayAPI.acceptGroupInvitation(groupId);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to accept group invitation');
+    }
+  }
+
+  /** Decline a group invitation. */
+  async declineGroupInvitation(groupId: string): Promise<void> {
+    const result = await this.relayAPI.declineGroupInvitation(groupId);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to decline group invitation');
+    }
+  }
+
+  /** Leave a group. Owners must dissolve instead. */
+  async leaveGroup(groupId: string): Promise<void> {
+    const result = await this.relayAPI.leaveGroup(groupId);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to leave group');
+    }
+    this.emit('group-member-change', { groupId, agent: this.options.username, action: 'left' });
+  }
+
+  /** Remove a member from a group (owner/admin only). */
+  async removeFromGroup(groupId: string, agent: string): Promise<void> {
+    const result = await this.relayAPI.removeMember(groupId, agent);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to remove member');
+    }
+    this.emit('group-member-change', { groupId, agent, action: 'removed' });
+  }
+
+  /** Dissolve a group (owner, or admin if owner offline > 7 days). */
+  async dissolveGroup(groupId: string): Promise<void> {
+    const result = await this.relayAPI.dissolveGroup(groupId);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to dissolve group');
+    }
+  }
+
+  /** List the caller's groups. */
+  async getGroups(): Promise<RelayGroup[]> {
+    const result = await this.relayAPI.listGroups();
+    if (!result.ok) return [];
+    return result.data || [];
+  }
+
+  /** List active members of a group. */
+  async getGroupMembers(groupId: string): Promise<RelayGroupMember[]> {
+    const result = await this.relayAPI.getGroupMembers(groupId);
+    if (!result.ok) return [];
+    return result.data || [];
+  }
+
+  /** List pending group invitations for the caller. */
+  async getGroupInvitations(): Promise<RelayGroupInvitation[]> {
+    const result = await this.relayAPI.getGroupInvitations();
+    if (!result.ok) return [];
+    return result.data || [];
+  }
+
+  /**
+   * Check for new group invitations and emit events.
+   * Returns new invitations found.
+   */
+  async checkGroupInvitations(): Promise<GroupInvitationEvent[]> {
+    const invitations = await this.getGroupInvitations();
+    const events: GroupInvitationEvent[] = [];
+    for (const inv of invitations) {
+      const event: GroupInvitationEvent = {
+        groupId: inv.groupId,
+        groupName: inv.groupName,
+        invitedBy: inv.invitedBy,
+        greeting: inv.greeting,
+      };
+      events.push(event);
+      this.emit('group-invitation', event);
+    }
+    return events;
+  }
+
+  // --- Group Messaging ---
+
+  /**
+   * Send an encrypted message to all group members (fan-out).
+   *
+   * Each member receives an individually encrypted envelope (1:1 ECDH keys).
+   * Deliveries happen in parallel (max 10 concurrent, 5s timeout each).
+   * Failed deliveries are queued in the RetryQueue.
+   */
+  async sendToGroup(groupId: string, payload: Record<string, unknown>): Promise<GroupSendResult> {
+    const messageId = randomUUID();
+    const members = await this.getGroupMembersCached(groupId);
+    const recipients = members.filter(m => m.agent !== this.options.username);
+
+    const result: GroupSendResult = { messageId, delivered: [], queued: [], failed: [] };
+
+    const deliverTo = async (member: RelayGroupMember) => {
+      const contact = this.getCachedContact(member.agent);
+      if (!contact?.publicKey) {
+        result.failed.push(member.agent);
+        return;
+      }
+
+      // Build per-member encrypted envelope with type='group'
+      const envelope = buildEnvelope({
+        sender: this.options.username,
+        recipient: member.agent,
+        payload,
+        senderPrivateKey: this.privateKeyObj,
+        recipientPublicKeyBase64: contact.publicKey,
+        messageId,
+        type: 'group',
+        groupId,
+      });
+
+      // Check presence
+      const presence = await this.checkPresence(member.agent);
+      if (!presence.online) {
+        const retryId = randomUUID();
+        const enqueued = this.retryQueue.enqueue(retryId, member.agent, payload, groupId);
+        if (enqueued) result.queued.push(member.agent);
+        else result.failed.push(member.agent);
+        return;
+      }
+
+      const endpoint = presence.endpoint || contact.endpoint;
+      if (!endpoint) {
+        result.failed.push(member.agent);
+        return;
+      }
+
+      // Deliver with 5s timeout
+      try {
+        const success = await Promise.race([
+          this.deliverFn(endpoint, envelope),
+          new Promise<false>(resolve => setTimeout(() => resolve(false), 5000)),
+        ]);
+        if (success) {
+          result.delivered.push(member.agent);
+        } else {
+          const retryId = randomUUID();
+          const enqueued = this.retryQueue.enqueue(retryId, member.agent, payload, groupId);
+          if (enqueued) result.queued.push(member.agent);
+          else result.failed.push(member.agent);
+        }
+      } catch {
+        result.failed.push(member.agent);
+      }
+    };
+
+    // Fan-out with concurrency limit
+    await parallelLimit(recipients, 10, deliverTo);
+    return result;
+  }
+
+  /**
+   * Process an incoming group message envelope.
+   *
+   * Verifies the sender's Ed25519 signature, decrypts with pairwise ECDH key,
+   * validates sender is a group member, and emits 'group-message' event.
+   * Deduplicates based on messageId (last 1000 seen). Returns null for duplicates.
+   * If sender is not in the member cache, refreshes from relay before rejecting.
+   */
+  async receiveGroupMessage(envelope: WireEnvelope): Promise<GroupMessage | null> {
+    if (envelope.type !== 'group') {
+      throw new Error('Not a group envelope');
+    }
+    if (!envelope.groupId) {
+      throw new Error('Missing groupId');
+    }
+    if (envelope.recipient !== this.options.username) {
+      throw new Error(`Message not addressed to us (to: ${envelope.recipient})`);
+    }
+
+    // Dedup: skip already-seen messageIds
+    if (this.seenGroupMessageIds.has(envelope.messageId)) {
+      return null;
+    }
+
+    // Check sender is a contact (needed for public key)
+    const contact = this.getCachedContact(envelope.sender);
+    if (!contact?.publicKey) {
+      throw new Error(`No public key for sender '${envelope.sender}'`);
+    }
+
+    // Verify signature + decrypt (same crypto as direct messages)
+    const processed = processEnvelope({
+      envelope,
+      recipientPrivateKey: this.privateKeyObj,
+      senderPublicKeyBase64: contact.publicKey,
+    });
+
+    // Verify sender is a member of the group
+    const cachedMembers = this.memberCache.get(envelope.groupId);
+    const members = cachedMembers?.members;
+    const isMember = members?.some(m => m.agent === envelope.sender);
+
+    if (!isMember) {
+      // Cache might be stale or missing — refresh from relay and check again
+      const freshMembers = await this.getGroupMembers(envelope.groupId);
+      this.memberCache.set(envelope.groupId, { members: freshMembers, fetchedAt: Date.now() });
+      const isMemberNow = freshMembers.some(m => m.agent === envelope.sender);
+      if (!isMemberNow) {
+        throw new Error(`Sender '${envelope.sender}' is not a member of group ${envelope.groupId}`);
+      }
+    }
+
+    // Track this messageId for dedup
+    this.seenGroupMessageIds.add(envelope.messageId);
+    if (this.seenGroupMessageIds.size > CC4MeNetwork.MAX_SEEN_GROUP_MSG_IDS) {
+      const first = this.seenGroupMessageIds.values().next().value;
+      if (first) this.seenGroupMessageIds.delete(first);
+    }
+
+    const msg: GroupMessage = {
+      groupId: envelope.groupId,
+      sender: processed.sender,
+      messageId: processed.messageId,
+      timestamp: processed.timestamp,
+      payload: processed.payload,
+      verified: processed.verified,
+    };
+
+    this.emit('group-message', msg);
+    return msg;
+  }
+
+  /** Transfer group ownership to another active member. */
+  async transferGroupOwnership(groupId: string, newOwner: string): Promise<void> {
+    const result = await this.relayAPI.transferGroupOwnership(groupId, newOwner);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to transfer ownership');
+    }
+    this.emit('group-member-change', { groupId, agent: newOwner, action: 'ownership-transferred' });
+  }
+
+  /** Get group members with local caching (60s staleness). */
+  private async getGroupMembersCached(groupId: string): Promise<RelayGroupMember[]> {
+    const cached = this.memberCache.get(groupId);
+    if (cached && Date.now() - cached.fetchedAt < CC4MeNetwork.MEMBER_CACHE_TTL) {
+      return cached.members;
+    }
+    const members = await this.getGroupMembers(groupId);
+    this.memberCache.set(groupId, { members, fetchedAt: Date.now() });
+    return members;
+  }
+
   // --- Delivery Reports ---
 
   /**
@@ -628,4 +925,17 @@ function safeParse(json: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/** Execute async functions with a concurrency limit. */
+async function parallelLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  const executing: Set<Promise<void>> = new Set();
+  for (const item of items) {
+    const p = fn(item).finally(() => executing.delete(p));
+    executing.add(p);
+    if (executing.size >= limit) {
+      await Promise.race(executing);
+    }
+  }
+  await Promise.all(executing);
 }

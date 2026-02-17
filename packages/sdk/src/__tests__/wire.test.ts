@@ -152,11 +152,13 @@ describe('t-052: Wire envelope format + canonical JSON + version check', () => {
 // ================================================================
 
 describe('Wire format: envelope type coverage', () => {
-  const allTypes = ['direct', 'broadcast', 'contact-request', 'contact-response', 'revocation', 'receipt'] as const;
+  const allTypes = ['direct', 'broadcast', 'contact-request', 'contact-response', 'revocation', 'receipt', 'group'] as const;
 
   for (const type of allTypes) {
     it(`validates ${type} envelope`, () => {
-      const env = validEnvelope({ type });
+      const overrides: Partial<WireEnvelope> = { type };
+      if (type === 'group') overrides.groupId = 'grp-test';
+      const env = validEnvelope(overrides);
       assert.ok(validateEnvelope(env), `${type} envelope should be valid`);
     });
   }
@@ -169,6 +171,74 @@ describe('Wire format: envelope type coverage', () => {
     // validateEnvelope checks typeof === 'string' which will still pass
     // This is fine — type enforcement is at the TS compiler level
     assert.ok(validateEnvelope(env), 'String type passes runtime validation');
+  });
+});
+
+// ================================================================
+// t-086: Group wire envelope validation
+// ================================================================
+
+describe('t-086: Group wire envelope validation', () => {
+  // Step 1: Valid group envelope with type='group', recipient, groupId
+  it('step 1: valid group envelope passes validation', () => {
+    const env = validEnvelope({ type: 'group', groupId: 'grp-001' } as Partial<WireEnvelope>);
+    assert.ok(validateEnvelope(env), 'Group envelope with groupId should pass');
+  });
+
+  // Step 2: Group envelope missing groupId fails
+  it('step 2: group envelope missing groupId fails', () => {
+    const env = validEnvelope({ type: 'group' } as Partial<WireEnvelope>);
+    // Ensure groupId is not set
+    delete (env as Record<string, unknown>).groupId;
+    assert.ok(!validateEnvelope(env), 'Group envelope without groupId should fail');
+  });
+
+  // Step 3: Direct envelope with groupId fails
+  it('step 3: direct envelope with groupId fails', () => {
+    const env = validEnvelope({ type: 'direct' });
+    (env as Record<string, unknown>).groupId = 'grp-001';
+    assert.ok(!validateEnvelope(env), 'Direct envelope with groupId should fail');
+  });
+
+  // Step 4: Direct envelope without groupId passes (unchanged behavior)
+  it('step 4: direct envelope without groupId passes', () => {
+    const env = validEnvelope({ type: 'direct' });
+    assert.ok(validateEnvelope(env), 'Direct envelope without groupId should pass');
+  });
+
+  // Step 5: TypeScript compiles with type='group' (verified by this test compiling)
+  it('step 5: WireEnvelope type union includes group', () => {
+    const env: WireEnvelope = {
+      version: '2.0',
+      type: 'group',
+      messageId: 'msg-group-001',
+      sender: 'alice',
+      recipient: 'bob',
+      timestamp: '2026-02-17T12:00:00Z',
+      groupId: 'grp-001',
+      payload: { ciphertext: 'encrypted', nonce: 'nonce123' },
+      signature: 'sig-placeholder',
+    };
+    assert.equal(env.type, 'group');
+    assert.equal(env.groupId, 'grp-001');
+  });
+
+  // Step 6: messageId used as AAD for group messages (same as Phase 1)
+  it('step 6: signablePayload includes messageId for group envelope', () => {
+    const env = validEnvelope({ type: 'group', groupId: 'grp-001' } as Partial<WireEnvelope>);
+    const payload = signablePayload(env);
+    const parsed = JSON.parse(payload);
+    assert.ok(parsed.messageId, 'messageId present in signable payload');
+    assert.equal(parsed.messageId, 'msg-001');
+    // groupId should also be in signable payload (signed, not stripped)
+    assert.equal(parsed.groupId, 'grp-001');
+  });
+
+  // Additional: empty groupId string fails for group type
+  it('empty groupId string fails for group type', () => {
+    const env = validEnvelope({ type: 'group' } as Partial<WireEnvelope>);
+    (env as Record<string, unknown>).groupId = '';
+    assert.ok(!validateEnvelope(env), 'Empty groupId should fail for group type');
   });
 });
 

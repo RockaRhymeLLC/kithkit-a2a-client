@@ -54,6 +54,8 @@ export interface BuildEnvelopeOptions {
   senderPrivateKey: KeyObject;
   recipientPublicKeyBase64: string;
   messageId?: string; // Optional: reuse for retries
+  type?: WireEnvelope['type']; // Default: 'direct'
+  groupId?: string; // Required when type='group'
 }
 
 /**
@@ -79,11 +81,12 @@ export function buildEnvelope(opts: BuildEnvelopeOptions): WireEnvelope {
   // Build envelope (signature placeholder)
   const envelope: WireEnvelope = {
     version: '2.0',
-    type: 'direct',
+    type: opts.type || 'direct',
     messageId,
     sender: opts.sender,
     recipient: opts.recipient,
     timestamp,
+    ...(opts.groupId ? { groupId: opts.groupId } : {}),
     payload: {
       ciphertext: ciphertext.toString('base64'),
       nonce: nonce.toString('base64'),

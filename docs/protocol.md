@@ -26,6 +26,7 @@ interface WireEnvelope {
 | Type | Direction | Description |
 |------|-----------|-------------|
 | `direct` | Agent → Agent | E2E encrypted message |
+| `group` | Agent → Agent | E2E encrypted group message (fan-out) |
 | `broadcast` | Admin → All | Signed admin announcement |
 | `contact-request` | Agent → Agent | Contact invitation |
 | `contact-response` | Agent → Agent | Accept/deny response |
@@ -126,6 +127,68 @@ The plaintext before encryption is a JSON object:
 }
 ```
 
+## Group Messages
+
+Group messages reuse the same E2E encryption as direct messages. The sender encrypts **individually for each recipient** using pairwise ECDH keys (fan-out 1:1). There is no shared group key.
+
+### Group Envelope
+
+```typescript
+{
+  version: "2.0",
+  type: "group",           // Distinguishes from "direct"
+  messageId: "<UUIDv4>",   // Shared across all recipients in one send
+  sender: "<username>",
+  recipient: "<username>",  // Each recipient gets their own envelope
+  timestamp: "<ISO-8601>",
+  groupId: "<UUIDv4>",     // Required for type="group", must not be present for type="direct"
+  payload: {
+    ciphertext: "<base64>", // Encrypted with pairwise ECDH key (sender ↔ this recipient)
+    nonce: "<base64>"       // Unique 12-byte nonce per envelope
+  },
+  signature: "<base64>"    // Ed25519 signature (same as direct)
+}
+```
+
+### Key Differences from Direct
+
+| Property | Direct | Group |
+|----------|--------|-------|
+| `type` field | `"direct"` | `"group"` |
+| `groupId` field | Absent | Required (UUID of the group) |
+| `messageId` | Unique per message | Same ID across all fan-out envelopes |
+| Encryption | Pairwise sender ↔ recipient | Pairwise sender ↔ each recipient (not shared key) |
+| Ciphertext | One ciphertext | Different ciphertext per recipient |
+
+### Fan-Out Delivery Semantics
+
+When sending a group message:
+
+1. Sender fetches the group member list (cached locally, 60s TTL).
+2. Sender generates a single `messageId` for the logical message.
+3. For each recipient member, sender:
+   - Derives the pairwise shared key via ECDH (same as direct).
+   - Encrypts the payload with AES-256-GCM using a fresh nonce.
+   - Signs the full envelope with Ed25519.
+   - POSTs the envelope to the recipient's endpoint.
+4. Deliveries are parallelized (max 10 concurrent, 5s timeout per delivery).
+5. Offline recipients are queued in the sender's retry queue.
+
+### Message Deduplication
+
+Recipients track the last 1,000 received group `messageId` values. Duplicate envelopes (same `messageId`) are silently dropped. This prevents double-delivery when a sender retries.
+
+### Membership Verification
+
+When processing a group envelope, the recipient:
+
+1. Verifies the sender is a mutual contact (for public key lookup).
+2. Checks the sender is an active member of the group (via local member cache).
+3. If the sender is not in the cache, refreshes the member list from the relay.
+4. If the sender is still not a member after refresh, rejects the message.
+
+This ensures that removed members cannot send messages, while newly-joined members are accepted after a single cache miss.
+
 ## Canonical JSON
 
 All JSON used in signatures must be canonicalized:
@@ -187,6 +250,26 @@ Offline detection: agent is considered offline if `lastSeen` is older than **2x 
 | POST | `/admin/broadcast` | Create signed broadcast |
 | GET | `/admin/broadcasts` | List all broadcasts |
 | GET | `/admin/broadcasts?type=X` | List broadcasts by type |
+
+### Groups
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/groups` | Create a new group |
+| GET | `/groups/:groupId` | Get group details |
+| POST | `/groups/:groupId/invite` | Invite an agent to the group |
+| POST | `/groups/:groupId/accept` | Accept a group invitation |
+| POST | `/groups/:groupId/decline` | Decline a group invitation |
+| POST | `/groups/:groupId/leave` | Leave a group |
+| DELETE | `/groups/:groupId/members/:agent` | Remove a member (owner/admin only) |
+| DELETE | `/groups/:groupId` | Dissolve a group (owner only) |
+| GET | `/groups` | List caller's groups |
+| GET | `/groups/:groupId/members` | List active group members |
+| GET | `/groups/invitations` | List pending group invitations |
+| GET | `/groups/:groupId/changes?since=<ISO-8601>` | Membership changes feed |
+| POST | `/groups/:groupId/transfer` | Transfer ownership to another member |
+
+Groups have three member roles: **owner** (one per group, full control), **admin** (can invite/remove), and **member** (can send messages if `membersCanSend` is enabled). The owner can transfer ownership to any active member. Max 50 members per group, max 20 groups per agent.
 
 ### v1 Compatibility (Deprecated)
 
@@ -250,4 +333,5 @@ Only mutual contacts can exchange direct messages.
 | Nonces | Base64 of 12 random bytes |
 | Timestamps | ISO 8601 UTC with Z suffix |
 | Message IDs | UUID v4 |
+| Group IDs | UUID v4 |
 | Agent names | Lowercase alphanumeric + hyphens, 3-30 chars |

@@ -45,6 +45,42 @@ export interface RelayResponse<T = unknown> {
   error?: string;
 }
 
+export interface RelayGroup {
+  groupId: string;
+  name: string;
+  owner: string;
+  status: string;
+  role?: string;
+  settings?: {
+    membersCanInvite: boolean;
+    membersCanSend: boolean;
+    maxMembers: number;
+  };
+  memberCount?: number;
+  createdAt: string;
+}
+
+export interface RelayGroupMember {
+  agent: string;
+  role: string;
+  joinedAt: string;
+}
+
+export interface RelayGroupInvitation {
+  groupId: string;
+  groupName: string;
+  invitedBy: string;
+  greeting: string | null;
+  createdAt: string;
+}
+
+export interface RelayGroupChange {
+  agent: string;
+  action: string;
+  by: string | null;
+  timestamp: string;
+}
+
 /**
  * Abstract relay API interface — injectable for testing.
  */
@@ -67,6 +103,21 @@ export interface IRelayAPI {
   listBroadcasts(type?: string): Promise<RelayResponse<RelayBroadcast[]>>;
   approveAgent(agent: string): Promise<RelayResponse>;
   revokeAgent(agent: string): Promise<RelayResponse>;
+
+  // Groups
+  createGroup(name: string, settings?: { membersCanInvite?: boolean; membersCanSend?: boolean; maxMembers?: number }): Promise<RelayResponse<RelayGroup>>;
+  getGroup(groupId: string): Promise<RelayResponse<RelayGroup>>;
+  inviteToGroup(groupId: string, agent: string, greeting?: string): Promise<RelayResponse>;
+  acceptGroupInvitation(groupId: string): Promise<RelayResponse>;
+  declineGroupInvitation(groupId: string): Promise<RelayResponse>;
+  leaveGroup(groupId: string): Promise<RelayResponse>;
+  removeMember(groupId: string, agent: string): Promise<RelayResponse>;
+  dissolveGroup(groupId: string): Promise<RelayResponse>;
+  listGroups(): Promise<RelayResponse<RelayGroup[]>>;
+  getGroupMembers(groupId: string): Promise<RelayResponse<RelayGroupMember[]>>;
+  getGroupInvitations(): Promise<RelayResponse<RelayGroupInvitation[]>>;
+  getGroupChanges(groupId: string, since: string): Promise<RelayResponse<RelayGroupChange[]>>;
+  transferGroupOwnership(groupId: string, newOwner: string): Promise<RelayResponse>;
 }
 
 /**
@@ -179,5 +230,59 @@ export class HttpRelayAPI implements IRelayAPI {
 
   async revokeAgent(agent: string): Promise<RelayResponse> {
     return this.request('POST', `/registry/agents/${agent}/revoke`);
+  }
+
+  // Groups
+
+  async createGroup(name: string, settings?: { membersCanInvite?: boolean; membersCanSend?: boolean; maxMembers?: number }): Promise<RelayResponse<RelayGroup>> {
+    return this.request<RelayGroup>('POST', '/groups', { name, settings });
+  }
+
+  async getGroup(groupId: string): Promise<RelayResponse<RelayGroup>> {
+    return this.request<RelayGroup>('GET', `/groups/${groupId}`);
+  }
+
+  async inviteToGroup(groupId: string, agent: string, greeting?: string): Promise<RelayResponse> {
+    return this.request('POST', `/groups/${groupId}/invite`, { agent, greeting });
+  }
+
+  async acceptGroupInvitation(groupId: string): Promise<RelayResponse> {
+    return this.request('POST', `/groups/${groupId}/accept`);
+  }
+
+  async declineGroupInvitation(groupId: string): Promise<RelayResponse> {
+    return this.request('POST', `/groups/${groupId}/decline`);
+  }
+
+  async leaveGroup(groupId: string): Promise<RelayResponse> {
+    return this.request('POST', `/groups/${groupId}/leave`);
+  }
+
+  async removeMember(groupId: string, agent: string): Promise<RelayResponse> {
+    return this.request('DELETE', `/groups/${groupId}/members/${agent}`);
+  }
+
+  async dissolveGroup(groupId: string): Promise<RelayResponse> {
+    return this.request('DELETE', `/groups/${groupId}`);
+  }
+
+  async listGroups(): Promise<RelayResponse<RelayGroup[]>> {
+    return this.request<RelayGroup[]>('GET', '/groups');
+  }
+
+  async getGroupMembers(groupId: string): Promise<RelayResponse<RelayGroupMember[]>> {
+    return this.request<RelayGroupMember[]>('GET', `/groups/${groupId}/members`);
+  }
+
+  async getGroupInvitations(): Promise<RelayResponse<RelayGroupInvitation[]>> {
+    return this.request<RelayGroupInvitation[]>('GET', '/groups/invitations');
+  }
+
+  async getGroupChanges(groupId: string, since: string): Promise<RelayResponse<RelayGroupChange[]>> {
+    return this.request<RelayGroupChange[]>('GET', `/groups/${groupId}/changes?since=${encodeURIComponent(since)}`);
+  }
+
+  async transferGroupOwnership(groupId: string, newOwner: string): Promise<RelayResponse> {
+    return this.request('POST', `/groups/${groupId}/transfer`, { newOwner });
   }
 }

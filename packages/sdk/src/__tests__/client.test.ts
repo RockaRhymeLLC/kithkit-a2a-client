@@ -138,6 +138,47 @@ class MockRelayAPI implements IRelayAPI {
   async revokeAgent(): Promise<RelayResponse> {
     return { ok: false, status: 403, error: 'Not admin' };
   }
+
+  // Group stubs — not tested in client.test.ts
+  async createGroup(): Promise<RelayResponse<import('../relay-api.js').RelayGroup>> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async getGroup(): Promise<RelayResponse<import('../relay-api.js').RelayGroup>> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async inviteToGroup(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async acceptGroupInvitation(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async declineGroupInvitation(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async leaveGroup(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async removeMember(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async dissolveGroup(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async listGroups(): Promise<RelayResponse<import('../relay-api.js').RelayGroup[]>> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async getGroupMembers(): Promise<RelayResponse<import('../relay-api.js').RelayGroupMember[]>> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async getGroupInvitations(): Promise<RelayResponse<import('../relay-api.js').RelayGroupInvitation[]>> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async getGroupChanges(): Promise<RelayResponse<import('../relay-api.js').RelayGroupChange[]>> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async transferGroupOwnership(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
 }
 
 interface TestEnv {
