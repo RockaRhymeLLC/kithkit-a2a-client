@@ -162,7 +162,6 @@ export class HttpRelayAPI implements IRelayAPI {
       const headers: Record<string, string> = {
         'Authorization': authHeader,
         'X-Timestamp': timestamp,
-        'Connection': 'close',
       };
       if (bodyStr) headers['Content-Type'] = 'application/json';
 

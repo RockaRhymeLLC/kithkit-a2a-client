@@ -6,6 +6,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { initializeDatabase, getDb, closeDb } from './db.js';
 import { authenticateRequest } from './auth.js';
 import {
@@ -60,8 +61,8 @@ const emailSender: EmailSender = sesSender;
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const DB_PATH = process.env.DB_PATH || './data/relay.db';
 
-// v1 compat sunset: 30 days from deployment
-const V1_SUNSET = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+// v1 compat sunset: fixed date (not relative to server start)
+const V1_SUNSET = new Date('2026-03-19T00:00:00Z');
 
 /** Read full request body as string. */
 function readBody(req: IncomingMessage): Promise<string> {
@@ -519,8 +520,9 @@ const server = createServer(async (req, res) => {
     // ==========================================================
     json(res, 404, { error: 'Not found' });
   } catch (err) {
-    console.error('Request error:', err);
-    json(res, 500, { error: 'Internal server error' });
+    const requestId = randomUUID();
+    console.error(`Request ${requestId} error:`, err);
+    json(res, 500, { error: 'Internal server error', requestId });
   }
 });
 

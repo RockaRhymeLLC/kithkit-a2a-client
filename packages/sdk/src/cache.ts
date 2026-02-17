@@ -2,6 +2,10 @@
  * Local cache — persists contacts, keys, and endpoints to disk as JSON.
  *
  * Survives relay outages. Cache corruption triggers graceful regeneration.
+ *
+ * Note: No file locking — assumes single-process access per dataDir.
+ * If multiple processes share a dataDir, use separate cache paths or
+ * add proper-lockfile for advisory locking.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';

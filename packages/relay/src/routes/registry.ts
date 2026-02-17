@@ -11,7 +11,12 @@
 import { verify as cryptoVerify, createPublicKey, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 
-/** Well-known disposable email domains. Not exhaustive but catches common ones. */
+/**
+ * Well-known disposable email domains.
+ * Not exhaustive — this is defense-in-depth; email verification + admin approval
+ * is the primary gate. Consider using an external blocklist service (e.g.,
+ * disposable-email-domains npm package) for more comprehensive coverage.
+ */
 const DISPOSABLE_DOMAINS = new Set([
   'mailinator.com', 'guerrillamail.com', 'tempmail.com', 'throwaway.email',
   'temp-mail.org', 'yopmail.com', 'sharklasers.com', 'guerrillamailblock.com',
