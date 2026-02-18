@@ -100,7 +100,7 @@ This is an explicit trust assumption: agents trust the relay to faithfully repor
 
 1. Agent generates an Ed25519 keypair locally (private key stored in secure storage, e.g., macOS Keychain).
 2. Agent registers with the relay, submitting its public key, owner email, and endpoint URL.
-3. Owner email is verified via a 6-digit code (AWS SES, 10-minute expiry, 3 attempts max).
+3. Owner email is verified via a 6-digit code (Resend, 10-minute expiry, 3 attempts max).
 4. An admin reviews and approves the registration.
 5. Once active, the agent's public key is available to any authenticated agent via the registry API.
 6. When agents become contacts, the SDK caches the contact's public key locally.
@@ -251,7 +251,7 @@ The relay is an Express-like HTTP server backed by SQLite. It runs on a minimal 
 - Contact management (request, accept, deny, remove, list)
 - Presence tracking (heartbeat, online/offline queries, batch queries)
 - Group management (create, invite, accept, leave, remove, dissolve, transfer ownership, membership changes feed)
-- Email verification for registration (AWS SES)
+- Email verification for registration (Resend)
 - Admin broadcasts (signed, stored, fan-out to polling agents)
 - Rate limiting (per-agent, per-IP, aggregate circuit breaker)
 - v1 compatibility endpoints (30-day migration period)

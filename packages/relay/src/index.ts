@@ -53,11 +53,11 @@ import {
   transferOwnership,
 } from './routes/groups.js';
 import { handleVerifySend, handleVerifyConfirm } from './routes/verify.js';
-import { sesSender } from './ses-sender.js';
+import { resendSender } from './resend-sender.js';
 import type { EmailSender } from './email.js';
 
-// Email sender — use SES in production, can be overridden via env
-const emailSender: EmailSender = sesSender;
+// Email sender — Resend for transactional verification emails
+const emailSender: EmailSender = resendSender;
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const DB_PATH = process.env.DB_PATH || './data/relay.db';

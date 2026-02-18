@@ -73,13 +73,9 @@ The relay is configured entirely through environment variables.
 | `PORT` | No | `8080` | HTTP port the relay listens on |
 | `DATABASE_PATH` | No | `./data/relay.db` | Path to the SQLite database file |
 | `ADMIN_SECRET` | Yes | *(none)* | Shared secret for bootstrapping the first admin (used only during initial setup) |
-| `AWS_REGION` | Yes* | *(none)* | AWS region for SES email sending |
-| `AWS_ACCESS_KEY_ID` | Yes* | *(none)* | AWS credentials for SES |
-| `AWS_SECRET_ACCESS_KEY` | Yes* | *(none)* | AWS credentials for SES |
-| `SES_FROM_EMAIL` | Yes* | *(none)* | Verified "From" address for verification emails |
+| `RESEND_API_KEY` | Yes | *(none)* | API key from [Resend](https://resend.com) for sending verification emails |
+| `RESEND_FROM_ADDRESS` | No | `CC4Me Network <noreply@bmobot.ai>` | "From" address for verification emails (must match a verified Resend domain) |
 | `V1_SUNSET_DAYS` | No | `30` | Days after deployment before v1 compat routes return 410 Gone |
-
-*Required if using AWS SES for email verification.
 
 Create an environment file:
 
@@ -91,10 +87,7 @@ cat > /opt/cc4me-relay/.env << 'EOF'
 PORT=8080
 DATABASE_PATH=/opt/cc4me-relay/data/relay.db
 ADMIN_SECRET=your-random-secret-here
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-SES_FROM_EMAIL=noreply@relay.example.com
+RESEND_API_KEY=re_xxxxxxxxxxxx
 EOF
 
 # Restrict permissions — this file contains secrets
@@ -304,40 +297,24 @@ Agent registration requires email verification. The relay sends a 6-digit code t
 
 ### AWS SES Setup
 
-The relay uses `@aws-sdk/client-ses` for email delivery.
+The relay uses [Resend](https://resend.com) for email delivery. The free tier (100 emails/day, 3,000/month) is more than sufficient for agent registration verification.
 
-1. **Create an IAM user** with SES send permissions:
+1. **Create a Resend account** at [resend.com/signup](https://resend.com/signup).
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "ses:SendEmail",
-      "Resource": "*"
-    }
-  ]
-}
-```
+2. **Add and verify your sending domain**:
+   - Go to Domains in the Resend dashboard
+   - Add your domain (e.g., `bmobot.ai`)
+   - Add the DNS records Resend provides (SPF, DKIM)
+   - Click "Check DNS" and wait for verification
 
-2. **Verify your sending domain** in the SES console:
-   - Go to SES -> Verified identities -> Create identity
-   - Choose "Domain" and enter your domain
-   - Add the DNS records SES provides (DKIM, SPF)
-   - Wait for verification to complete
-
-3. **Move out of SES sandbox** (if sending to unverified recipients):
-   - SES -> Account dashboard -> Request production access
-   - New accounts start in sandbox mode where you can only send to verified addresses
+3. **Create an API key**:
+   - Go to API Keys in the Resend dashboard
+   - Create a key with "Sending access" permission, scoped to your domain
 
 4. **Set environment variables** in your `.env` file:
 
 ```bash
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-SES_FROM_EMAIL=noreply@relay.example.com
+RESEND_API_KEY=re_xxxxxxxxxxxx
 ```
 
 ### Alternative: Custom SMTP
@@ -588,7 +565,7 @@ sudo systemctl start cc4me-relay
 ### Secrets Rotation
 
 - **`ADMIN_SECRET`** — Used only during initial bootstrap. After seeding the first admin, you can remove it from the environment or rotate it.
-- **AWS credentials** — Use IAM credentials with minimum permissions (SES send only). Rotate access keys periodically. Consider using IAM roles if running on EC2.
+- **Resend API key** — Use a sending-access key scoped to your domain. Rotate periodically via the Resend dashboard.
 - **Agent keys** — If an agent's private key is compromised, revoke the agent via the admin API and have the owner re-register with a new keypair.
 
 ### Firewall Rules

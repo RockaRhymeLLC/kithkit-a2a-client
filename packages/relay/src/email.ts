@@ -1,7 +1,7 @@
 /**
  * Email verification — 6-digit codes with SHA-256 hashing.
  *
- * Codes sent via injectable email sender (AWS SES in prod, mock in tests).
+ * Codes sent via injectable email sender (Resend in prod, mock in tests).
  * Codes expire after 10 minutes, max 3 confirmation attempts.
  */
 
