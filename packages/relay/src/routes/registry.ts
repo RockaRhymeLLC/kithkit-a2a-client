@@ -72,56 +72,43 @@ export function registerAgent(
     return { ok: false, status: 400, error: 'Disposable email domains not allowed' };
   }
 
-  // Check for existing agent
+  // Check for existing agent with same name
   const existing = db.prepare('SELECT name FROM agents WHERE name = ?').get(name);
   if (existing) {
     return { ok: false, status: 409, error: 'Agent already exists' };
   }
 
-  // Insert agent as pending
+  // Check for existing agent with same email
+  const emailExists = db.prepare('SELECT name FROM agents WHERE owner_email = ?').get(ownerEmail);
+  if (emailExists) {
+    return { ok: false, status: 409, error: 'An agent with this email already exists' };
+  }
+
+  // Check for existing agent with same public key
+  const pubkeyExists = db.prepare('SELECT name FROM agents WHERE public_key = ?').get(publicKey);
+  if (pubkeyExists) {
+    return { ok: false, status: 409, error: 'An agent with this public key already exists' };
+  }
+
+  // Insert agent as active (auto-approved after email verification)
   db.prepare(
     'INSERT INTO agents (name, public_key, owner_email, endpoint, email_verified, status) VALUES (?, ?, ?, ?, 1, ?)'
-  ).run(name, publicKey, ownerEmail, endpoint || null, 'pending');
+  ).run(name, publicKey, ownerEmail, endpoint || null, 'active');
 
-  return { ok: true, agent: { name, status: 'pending' } };
+  return { ok: true, agent: { name, status: 'active' } };
 }
 
 /**
- * Approve a pending agent. Requires admin key signature verification.
- *
- * @param adminAgent - The agent name claiming admin privileges
+ * Approve a pending agent — REMOVED in v3.
+ * Registration is now auto-approved after email verification.
+ * Returns 410 Gone.
  */
 export function approveAgent(
-  db: Database.Database,
-  targetName: string,
-  adminAgent: string,
+  _db: Database.Database,
+  _targetName: string,
+  _adminAgent: string,
 ): RegistrationResult {
-  // Verify the caller is an admin
-  const admin = db.prepare('SELECT agent FROM admins WHERE agent = ?').get(adminAgent) as
-    | { agent: string } | undefined;
-
-  if (!admin) {
-    return { ok: false, status: 403, error: 'Not an admin' };
-  }
-
-  // Look up target agent
-  const agent = db.prepare('SELECT name, status FROM agents WHERE name = ?').get(targetName) as
-    | { name: string; status: string } | undefined;
-
-  if (!agent) {
-    return { ok: false, status: 404, error: 'Agent not found' };
-  }
-
-  if (agent.status === 'active') {
-    return { ok: true, agent: { name: targetName, status: 'active' } };
-  }
-
-  // Approve
-  db.prepare(
-    "UPDATE agents SET status = 'active', approved_by = ?, approved_at = datetime('now') WHERE name = ?"
-  ).run(adminAgent, targetName);
-
-  return { ok: true, agent: { name: targetName, status: 'active' } };
+  return { ok: false, status: 410, error: 'Gone — admin approval removed in v3, registration is auto-approved' };
 }
 
 /**
@@ -167,26 +154,12 @@ export function revokeAgent(
 }
 
 /**
- * List all registered agents (public directory).
+ * List all registered agents — REMOVED in v3.
+ * Public directory listing is no longer available.
+ * Returns 410 Gone.
  */
-export function listAgents(db: Database.Database): Array<{
-  name: string;
-  publicKey: string;
-  status: string;
-  endpoint: string | null;
-  createdAt: string;
-}> {
-  const rows = db.prepare(
-    'SELECT name, public_key, status, endpoint, created_at FROM agents ORDER BY name'
-  ).all() as Array<{ name: string; public_key: string; status: string; endpoint: string | null; created_at: string }>;
-
-  return rows.map((r) => ({
-    name: r.name,
-    publicKey: r.public_key,
-    status: r.status,
-    endpoint: r.endpoint,
-    createdAt: r.created_at,
-  }));
+export function listAgents(_db: Database.Database): { ok: false; status: 410; error: string } {
+  return { ok: false, status: 410, error: 'Gone — public directory listing removed in v3' };
 }
 
 /**
@@ -217,5 +190,27 @@ export function getAgent(db: Database.Database, name: string): {
     emailVerified: !!row.email_verified,
     createdAt: row.created_at,
     approvedBy: row.approved_by,
+  };
+}
+
+/**
+ * Lookup an agent's public info (v3). Returns only name, publicKey, status.
+ * No endpoint, ownerEmail, or other private fields.
+ */
+export function lookupAgent(db: Database.Database, name: string): {
+  name: string;
+  publicKey: string;
+  status: string;
+} | null {
+  const row = db.prepare(
+    'SELECT name, public_key, status FROM agents WHERE name = ?'
+  ).get(name) as { name: string; public_key: string; status: string } | undefined;
+
+  if (!row) return null;
+
+  return {
+    name: row.name,
+    publicKey: row.public_key,
+    status: row.status,
   };
 }

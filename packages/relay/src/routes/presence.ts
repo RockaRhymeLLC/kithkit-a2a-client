@@ -64,61 +64,28 @@ export function updatePresence(
 }
 
 /**
- * Get presence for a single agent.
+ * Get presence for a single agent — REMOVED in v3.
+ * Presence info is now only available via GET /contacts.
+ * Returns 410 Gone.
  */
 export function getPresence(
-  db: Database.Database,
-  agent: string,
-  now: number = Date.now(),
-): PresenceInfo | null {
-  const row = db.prepare(
-    'SELECT name, endpoint, last_seen, status FROM agents WHERE name = ?'
-  ).get(agent) as { name: string; endpoint: string | null; last_seen: string | null; status: string } | undefined;
-
-  if (!row || row.status === 'revoked') {
-    return null;
-  }
-
-  const online = isOnline(row.last_seen, now);
-
-  return {
-    agent: row.name,
-    online,
-    endpoint: row.endpoint,
-    lastSeen: row.last_seen,
-  };
+  _db: Database.Database,
+  _agent: string,
+  _now: number = Date.now(),
+): { ok: false; status: 410; error: string } {
+  return { ok: false, status: 410, error: 'Gone — presence queries removed in v3, use GET /contacts instead' };
 }
 
 /**
- * Get presence for multiple agents in a single call.
+ * Get presence for multiple agents — REMOVED in v3.
+ * Returns 410 Gone.
  */
 export function batchPresence(
-  db: Database.Database,
-  agents: string[],
-  now: number = Date.now(),
-): PresenceInfo[] {
-  if (agents.length === 0) return [];
-
-  // Query all requested agents
-  const placeholders = agents.map(() => '?').join(',');
-  const rows = db.prepare(
-    `SELECT name, endpoint, last_seen, status FROM agents WHERE name IN (${placeholders})`
-  ).all(...agents) as Array<{ name: string; endpoint: string | null; last_seen: string | null; status: string }>;
-
-  const rowMap = new Map(rows.map((r) => [r.name, r]));
-
-  return agents.map((name) => {
-    const row = rowMap.get(name);
-    if (!row || row.status === 'revoked') {
-      return { agent: name, online: false, endpoint: null, lastSeen: null };
-    }
-    return {
-      agent: row.name,
-      online: isOnline(row.last_seen, now),
-      endpoint: row.endpoint,
-      lastSeen: row.last_seen,
-    };
-  });
+  _db: Database.Database,
+  _agents: string[],
+  _now: number = Date.now(),
+): { ok: false; status: 410; error: string } {
+  return { ok: false, status: 410, error: 'Gone — presence queries removed in v3, use GET /contacts instead' };
 }
 
 /**

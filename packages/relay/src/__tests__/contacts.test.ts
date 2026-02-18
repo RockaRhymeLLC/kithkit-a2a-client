@@ -15,12 +15,18 @@ import { initializeDatabase } from '../db.js';
 import { hashCode } from '../email.js';
 import {
   requestContact,
+  requestContactBatch,
   listPendingRequests,
   acceptContact,
   denyContact,
   removeContact,
   listContacts,
 } from '../routes/contacts.js';
+import {
+  updatePresence,
+  getPresence,
+  batchPresence,
+} from '../routes/presence.js';
 
 function setupDb() {
   const dir = mkdtempSync(join(tmpdir(), 'relay-contacts-test-'));
@@ -46,10 +52,11 @@ function createActiveAgent(
   name: string,
   publicKeyBase64: string,
   endpoint?: string,
+  email?: string,
 ) {
   db.prepare(
-    "INSERT INTO agents (name, public_key, endpoint, email_verified, status, approved_by, approved_at) VALUES (?, ?, ?, 1, 'active', 'test-admin', datetime('now'))"
-  ).run(name, publicKeyBase64, endpoint || null);
+    "INSERT INTO agents (name, public_key, endpoint, owner_email, email_verified, status, approved_by, approved_at) VALUES (?, ?, ?, ?, 1, 'active', 'test-admin', datetime('now'))"
+  ).run(name, publicKeyBase64, endpoint || null, email || null);
 }
 
 /** Seed an admin entry (needed for approval fast-path). */
@@ -97,34 +104,33 @@ describe('t-059: Contact request → accept → mutual messaging', () => {
     db.close();
   });
 
-  // Step 2: POST /contacts/request from alice with greeting "Hi Bob!"
-  it('step 2: alice sends contact request to bob with greeting', () => {
+  // Step 2: POST /contacts/request from alice to bob (canned, no greeting)
+  it('step 2: alice sends contact request to bob', () => {
     const db = withDb();
     const alice = genKeypair();
     const bob = genKeypair();
     createActiveAgent(db, 'alice', alice.publicKeyBase64);
     createActiveAgent(db, 'bob', bob.publicKeyBase64);
 
-    const result = requestContact(db, 'alice', 'bob', 'Hi Bob!');
+    const result = requestContact(db, 'alice', 'bob');
     assert.equal(result.ok, true);
     assert.equal(result.status, 201);
 
     db.close();
   });
 
-  // Step 3: GET /contacts/pending as bob — returns alice's request with greeting
-  it('step 3: bob sees alice pending request with greeting', () => {
+  // Step 3: GET /contacts/pending as bob — returns alice's request
+  it('step 3: bob sees alice pending request', () => {
     const db = withDb();
     const alice = genKeypair();
     const bob = genKeypair();
     createActiveAgent(db, 'alice', alice.publicKeyBase64);
     createActiveAgent(db, 'bob', bob.publicKeyBase64);
-    requestContact(db, 'alice', 'bob', 'Hi Bob!');
+    requestContact(db, 'alice', 'bob');
 
     const pending = listPendingRequests(db, 'bob');
     assert.equal(pending.length, 1);
     assert.equal(pending[0]!.from, 'alice');
-    assert.equal(pending[0]!.greeting, 'Hi Bob!');
 
     db.close();
   });
@@ -136,7 +142,7 @@ describe('t-059: Contact request → accept → mutual messaging', () => {
     const bob = genKeypair();
     createActiveAgent(db, 'alice', alice.publicKeyBase64);
     createActiveAgent(db, 'bob', bob.publicKeyBase64);
-    requestContact(db, 'alice', 'bob', 'Hi Bob!');
+    requestContact(db, 'alice', 'bob');
 
     const result = acceptContact(db, 'bob', 'alice');
     assert.equal(result.ok, true);
@@ -157,7 +163,7 @@ describe('t-059: Contact request → accept → mutual messaging', () => {
     const bob = genKeypair();
     createActiveAgent(db, 'alice', alice.publicKeyBase64, 'https://alice.example.com/inbox');
     createActiveAgent(db, 'bob', bob.publicKeyBase64, 'https://bob.example.com/inbox');
-    requestContact(db, 'alice', 'bob', 'Hi Bob!');
+    requestContact(db, 'alice', 'bob');
     acceptContact(db, 'bob', 'alice');
 
     const contacts = listContacts(db, 'alice');
@@ -176,7 +182,7 @@ describe('t-059: Contact request → accept → mutual messaging', () => {
     const bob = genKeypair();
     createActiveAgent(db, 'alice', alice.publicKeyBase64, 'https://alice.example.com/inbox');
     createActiveAgent(db, 'bob', bob.publicKeyBase64, 'https://bob.example.com/inbox');
-    requestContact(db, 'alice', 'bob', 'Hi Bob!');
+    requestContact(db, 'alice', 'bob');
     acceptContact(db, 'bob', 'alice');
 
     const contacts = listContacts(db, 'bob');
@@ -195,7 +201,7 @@ describe('t-059: Contact request → accept → mutual messaging', () => {
     const bob = genKeypair();
     createActiveAgent(db, 'alice', alice.publicKeyBase64);
     createActiveAgent(db, 'bob', bob.publicKeyBase64);
-    requestContact(db, 'alice', 'bob', 'Hi Bob!');
+    requestContact(db, 'alice', 'bob');
     acceptContact(db, 'bob', 'alice');
 
     // "alice" < "bob" alphabetically, so agent_a = alice, agent_b = bob
@@ -495,18 +501,17 @@ describe('Contacts: edge cases', () => {
     db.close();
   });
 
-  it('greeting over 500 chars rejected', () => {
+  it('greeting rejected in v3 (canned requests only)', () => {
     const db = withDb();
     const alice = genKeypair();
     const bob = genKeypair();
     createActiveAgent(db, 'alice', alice.publicKeyBase64);
     createActiveAgent(db, 'bob', bob.publicKeyBase64);
 
-    const longGreeting = 'x'.repeat(501);
-    const result = requestContact(db, 'alice', 'bob', longGreeting);
+    const result = requestContact(db, 'alice', 'bob', 'hello');
     assert.equal(result.ok, false);
     assert.equal(result.status, 400);
-    assert.match(result.error!, /too long/i);
+    assert.match(result.error!, /greeting/i);
 
     db.close();
   });
@@ -570,6 +575,505 @@ describe('Contacts: edge cases', () => {
     const bobPending = listPendingRequests(db, 'bob');
     assert.equal(bobPending.length, 1);
 
+    db.close();
+  });
+});
+
+// ================================================================
+// t-100: Contact request: canned (no greeting), batch support
+// ================================================================
+
+describe('t-100: Contact request: canned (no greeting), batch support', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: Request with greeting → 400
+  it('step 1: request with greeting rejected', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, '', 'a@test.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, '', 'b@test.com');
+
+    const result = requestContact(db, 'agent-a', 'agent-b', 'hello');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 400);
+    assert.match(result.error!, /greeting/i);
+
+    db.close();
+  });
+
+  // Step 2: Request without greeting → 201
+  it('step 2: request without greeting succeeds', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, '', 'a@test.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, '', 'b@test.com');
+
+    const result = requestContact(db, 'agent-a', 'agent-b');
+    assert.equal(result.ok, true);
+    assert.equal(result.status, 201);
+
+    db.close();
+  });
+
+  // Step 3: Pending shows requesterEmail, no greeting
+  it('step 3: pending request includes requesterEmail, no greeting', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, '', 'a@test.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, '', 'b@test.com');
+    requestContact(db, 'agent-a', 'agent-b');
+
+    const pending = listPendingRequests(db, 'agent-b');
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]!.from, 'agent-a');
+    assert.equal(pending[0]!.requesterEmail, 'a@test.com');
+    assert.equal((pending[0] as any).greeting, undefined, 'greeting should not be in response');
+
+    db.close();
+  });
+
+  // Step 4: Batch request creates multiple pending entries
+  it('step 4: batch request creates multiple pending entries', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    const agentC = genKeypair();
+    const agentD = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, '', 'a@test.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, '', 'b@test.com');
+    createActiveAgent(db, 'agent-c', agentC.publicKeyBase64, '', 'c@test.com');
+    createActiveAgent(db, 'agent-d', agentD.publicKeyBase64, '', 'd@test.com');
+
+    const result = requestContactBatch(db, 'agent-a', ['agent-b', 'agent-c', 'agent-d']);
+    assert.equal(result.ok, true);
+    assert.equal(result.results.length, 3);
+    assert.ok(result.results.every(r => r.ok));
+
+    // Verify each target has a pending request
+    const pendingB = listPendingRequests(db, 'agent-b');
+    const pendingC = listPendingRequests(db, 'agent-c');
+    const pendingD = listPendingRequests(db, 'agent-d');
+    assert.equal(pendingB.length, 1);
+    assert.equal(pendingC.length, 1);
+    assert.equal(pendingD.length, 1);
+
+    db.close();
+  });
+});
+
+// ================================================================
+// t-101: Contact request: 404 for non-existent target, rate limiting
+// ================================================================
+
+describe('t-101: Contact request: 404 for non-existent, rate limiting', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: Request to non-existent → 404
+  it('step 1: request to non-existent agent returns 404', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64);
+
+    const result = requestContact(db, 'agent-a', 'nonexistent-agent');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 404);
+
+    db.close();
+  });
+
+  // Step 2: 101st request in 1 hour returns 429
+  it('step 2: rate limit enforced at 100/hour per sender', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64);
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64);
+
+    // Pre-populate rate limit counter to 100 (within current hour window)
+    const windowStart = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    db.prepare('INSERT INTO rate_limits (key, count, window_start) VALUES (?, ?, ?)')
+      .run('contacts:request:agent-a', 100, windowStart);
+
+    const result = requestContact(db, 'agent-a', 'agent-b');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 429);
+
+    db.close();
+  });
+});
+
+// ================================================================
+// t-102: Auto-block after 3 denials from same target
+// ================================================================
+
+describe('t-102: Auto-block after 3 denials from same target', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: Request, deny → denial_count=1
+  it('step 1: first denial sets denial_count to 1', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64);
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64);
+
+    requestContact(db, 'agent-a', 'agent-b');
+    denyContact(db, 'agent-b', 'agent-a');
+
+    const row = db.prepare(
+      "SELECT denial_count FROM contacts WHERE agent_a = 'agent-a' AND agent_b = 'agent-b'"
+    ).get() as any;
+    assert.equal(row.denial_count, 1);
+
+    db.close();
+  });
+
+  // Step 2: Re-request, deny → denial_count=2
+  it('step 2: second denial sets denial_count to 2', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64);
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64);
+
+    requestContact(db, 'agent-a', 'agent-b');
+    denyContact(db, 'agent-b', 'agent-a');
+    requestContact(db, 'agent-a', 'agent-b');
+    denyContact(db, 'agent-b', 'agent-a');
+
+    const row = db.prepare(
+      "SELECT denial_count FROM contacts WHERE agent_a = 'agent-a' AND agent_b = 'agent-b'"
+    ).get() as any;
+    assert.equal(row.denial_count, 2);
+
+    db.close();
+  });
+
+  // Step 3: Third denial → auto-block
+  it('step 3: third denial triggers auto-block', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64);
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64);
+
+    requestContact(db, 'agent-a', 'agent-b');
+    denyContact(db, 'agent-b', 'agent-a');
+    requestContact(db, 'agent-a', 'agent-b');
+    denyContact(db, 'agent-b', 'agent-a');
+    requestContact(db, 'agent-a', 'agent-b');
+    denyContact(db, 'agent-b', 'agent-a');
+
+    // Check block record exists (agent-b blocked agent-a)
+    const block = db.prepare(
+      "SELECT * FROM blocks WHERE blocker = 'agent-b' AND blocked = 'agent-a'"
+    ).get();
+    assert.ok(block, 'Block record should exist');
+
+    db.close();
+  });
+
+  // Step 4: Blocked agent cannot send request → 403
+  it('step 4: blocked agent cannot send further requests', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64);
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64);
+
+    requestContact(db, 'agent-a', 'agent-b');
+    denyContact(db, 'agent-b', 'agent-a');
+    requestContact(db, 'agent-a', 'agent-b');
+    denyContact(db, 'agent-b', 'agent-a');
+    requestContact(db, 'agent-a', 'agent-b');
+    denyContact(db, 'agent-b', 'agent-a');
+
+    // Try to request again — should be blocked
+    const result = requestContact(db, 'agent-a', 'agent-b');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 403);
+
+    db.close();
+  });
+});
+
+// ================================================================
+// t-103: Pending requests expire after 30 days
+// ================================================================
+
+describe('t-103: Pending requests expire after 30 days', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: Create old pending request
+  it('step 1: old pending request stored in DB', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64);
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64);
+
+    // Insert a pending request 31 days old
+    const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO contacts (agent_a, agent_b, status, requested_by, created_at, updated_at)
+       VALUES ('agent-a', 'agent-b', 'pending', 'agent-a', ?, ?)`
+    ).run(oldDate, oldDate);
+
+    const row = db.prepare("SELECT * FROM contacts WHERE agent_a = 'agent-a' AND agent_b = 'agent-b'").get();
+    assert.ok(row, 'Old pending request should be stored');
+
+    db.close();
+  });
+
+  // Step 2: Expired request NOT returned in listPendingRequests
+  it('step 2: expired request not returned in pending list', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64);
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64);
+
+    const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO contacts (agent_a, agent_b, status, requested_by, created_at, updated_at)
+       VALUES ('agent-a', 'agent-b', 'pending', 'agent-a', ?, ?)`
+    ).run(oldDate, oldDate);
+
+    const pending = listPendingRequests(db, 'agent-b');
+    assert.equal(pending.length, 0, 'Expired pending request should not appear');
+
+    db.close();
+  });
+
+  // Step 3: Re-request after expiry creates new pending
+  it('step 3: re-request after expiry creates new pending', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64);
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64);
+
+    const oldDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO contacts (agent_a, agent_b, status, requested_by, created_at, updated_at)
+       VALUES ('agent-a', 'agent-b', 'pending', 'agent-a', ?, ?)`
+    ).run(oldDate, oldDate);
+
+    // Re-request should succeed (expired pending treated like no request)
+    const result = requestContact(db, 'agent-a', 'agent-b');
+    assert.equal(result.ok, true);
+    assert.equal(result.status, 201);
+
+    // New request should appear in pending
+    const pending = listPendingRequests(db, 'agent-b');
+    assert.equal(pending.length, 1);
+
+    db.close();
+  });
+});
+
+// ================================================================
+// t-104: Contact accept triggers endpoint exchange
+// ================================================================
+
+describe('t-104: Contact accept triggers endpoint exchange', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: Agent-a requests agent-b
+  it('step 1: request creates pending entry', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, 'https://a.example.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, 'https://b.example.com');
+
+    const result = requestContact(db, 'agent-a', 'agent-b');
+    assert.equal(result.ok, true);
+
+    db.close();
+  });
+
+  // Step 2: Accept returns contact info with endpoint and publicKey
+  it('step 2: accept returns contact info', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, 'https://a.example.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, 'https://b.example.com');
+    requestContact(db, 'agent-a', 'agent-b');
+
+    const result = acceptContact(db, 'agent-b', 'agent-a');
+    assert.equal(result.ok, true);
+    assert.ok(result.contact, 'accept should return contact info');
+    assert.equal(result.contact!.agent, 'agent-a');
+    assert.equal(result.contact!.endpoint, 'https://a.example.com');
+    assert.equal(result.contact!.publicKey, agentA.publicKeyBase64);
+
+    db.close();
+  });
+
+  // Step 3: GET /contacts as agent-a shows agent-b
+  it('step 3: agent-a sees agent-b in contacts with endpoint', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, 'https://a.example.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, 'https://b.example.com');
+    requestContact(db, 'agent-a', 'agent-b');
+    acceptContact(db, 'agent-b', 'agent-a');
+
+    const contacts = listContacts(db, 'agent-a');
+    assert.equal(contacts.length, 1);
+    assert.equal(contacts[0]!.agent, 'agent-b');
+    assert.equal(contacts[0]!.endpoint, 'https://b.example.com');
+    assert.equal(contacts[0]!.publicKey, agentB.publicKeyBase64);
+
+    db.close();
+  });
+
+  // Step 4: GET /contacts as agent-b shows agent-a
+  it('step 4: agent-b sees agent-a in contacts with endpoint', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, 'https://a.example.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, 'https://b.example.com');
+    requestContact(db, 'agent-a', 'agent-b');
+    acceptContact(db, 'agent-b', 'agent-a');
+
+    const contacts = listContacts(db, 'agent-b');
+    assert.equal(contacts.length, 1);
+    assert.equal(contacts[0]!.agent, 'agent-a');
+    assert.equal(contacts[0]!.endpoint, 'https://a.example.com');
+    assert.equal(contacts[0]!.publicKey, agentA.publicKeyBase64);
+
+    db.close();
+  });
+});
+
+// ================================================================
+// t-105: GET /contacts includes presence + removed presence endpoints
+// ================================================================
+
+describe('t-105: GET /contacts includes presence, removed presence endpoints', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: Agent-b sends heartbeat
+  it('step 1: heartbeat recorded', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, 'https://a.example.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, 'https://b.example.com');
+
+    const result = updatePresence(db, 'agent-b', 'https://b.example.com');
+    assert.equal(result.ok, true);
+
+    db.close();
+  });
+
+  // Step 2: GET /contacts includes online and lastSeen
+  it('step 2: contacts include online and lastSeen', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    createActiveAgent(db, 'agent-a', agentA.publicKeyBase64, 'https://a.example.com');
+    createActiveAgent(db, 'agent-b', agentB.publicKeyBase64, 'https://b.example.com');
+    requestContact(db, 'agent-a', 'agent-b');
+    acceptContact(db, 'agent-b', 'agent-a');
+    updatePresence(db, 'agent-b', 'https://b.example.com');
+
+    const contacts = listContacts(db, 'agent-a');
+    assert.equal(contacts.length, 1);
+    assert.equal(contacts[0]!.agent, 'agent-b');
+    assert.equal(contacts[0]!.online, true);
+    assert.ok(contacts[0]!.lastSeen, 'lastSeen should be present');
+
+    db.close();
+  });
+
+  // Step 3: GET /presence/:agent returns 410
+  it('step 3: getPresence returns 410 Gone', () => {
+    const db = withDb();
+    const result = getPresence(db, 'agent-b');
+    assert.equal((result as any).status, 410);
+    db.close();
+  });
+
+  // Step 4: GET /presence/batch returns 410
+  it('step 4: batchPresence returns 410 Gone', () => {
+    const db = withDb();
+    const result = batchPresence(db, ['agent-b']);
+    assert.equal((result as any).status, 410);
     db.close();
   });
 });

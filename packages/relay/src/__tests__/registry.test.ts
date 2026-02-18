@@ -20,6 +20,7 @@ import {
   revokeAgent,
   listAgents,
   getAgent,
+  lookupAgent,
 } from '../routes/registry.js';
 import { listPendingRegistrations, listAdminKeys, listBroadcasts } from '../routes/admin.js';
 
@@ -111,8 +112,8 @@ describe('t-057: Multi-admin: register, approve, checklist enforcement', () => {
     db.close();
   });
 
-  // Step 3: Register "atlas" → pending
-  it('step 3: register agent after email verification → pending', () => {
+  // Step 3: Register "atlas" → active (auto-approved in v3)
+  it('step 3: register agent after email verification → active', () => {
     const db = withDb();
     const atlas = genKeypair();
 
@@ -120,16 +121,16 @@ describe('t-057: Multi-admin: register, approve, checklist enforcement', () => {
     const result = registerAgent(db, 'atlas', atlas.publicKeyBase64, 'atlas@example.com', 'https://atlas.example.com/inbox');
 
     assert.equal(result.ok, true);
-    assert.equal(result.agent?.status, 'pending');
+    assert.equal(result.agent?.status, 'active');
 
     const agent = getAgent(db, 'atlas');
-    assert.equal(agent?.status, 'pending');
+    assert.equal(agent?.status, 'active');
 
     db.close();
   });
 
-  // Step 4: Approve with bmo's admin key → active
-  it('step 4: approve agent with admin key → active', () => {
+  // Step 4: approveAgent returns 410 Gone (removed in v3)
+  it('step 4: approveAgent returns 410 Gone', () => {
     const db = withDb();
     const bmo = genKeypair();
     const atlas = genKeypair();
@@ -138,19 +139,20 @@ describe('t-057: Multi-admin: register, approve, checklist enforcement', () => {
     verifyEmail(db, 'atlas', 'atlas@example.com');
     registerAgent(db, 'atlas', atlas.publicKeyBase64, 'atlas@example.com', '');
 
-    const result = approveAgent(db, 'atlas', 'bmo');
-    assert.equal(result.ok, true);
-    assert.equal(result.agent?.status, 'active');
-
+    // Agent is already active via auto-approve
     const agent = getAgent(db, 'atlas');
     assert.equal(agent?.status, 'active');
-    assert.equal(agent?.approvedBy, 'bmo');
+
+    // approveAgent should return 410 Gone
+    const result = approveAgent(db, 'atlas', 'bmo');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 410);
 
     db.close();
   });
 
-  // Step 5: Non-admin approval → 403
-  it('step 5: approve with non-admin key → 403', () => {
+  // Step 5: approveAgent returns 410 regardless of caller
+  it('step 5: approveAgent returns 410 regardless of caller', () => {
     const db = withDb();
     const atlas = genKeypair();
 
@@ -159,7 +161,7 @@ describe('t-057: Multi-admin: register, approve, checklist enforcement', () => {
 
     const result = approveAgent(db, 'atlas', 'random-agent');
     assert.equal(result.ok, false);
-    assert.equal(result.status, 403);
+    assert.equal(result.status, 410);
 
     db.close();
   });
@@ -179,45 +181,23 @@ describe('t-057: Multi-admin: register, approve, checklist enforcement', () => {
     db.close();
   });
 
-  // Step 7: GET /admin/pending lists pending registrations
-  it('step 7: list pending registrations', () => {
+  // Step 7: listPendingRegistrations returns 410 Gone (removed in v3)
+  it('step 7: listPendingRegistrations returns 410 Gone', () => {
     const db = withDb();
-    const bmo = genKeypair();
-    seedAdmins(db, [{ name: 'bmo', publicKeyBase64: bmo.publicKeyBase64 }]);
-
-    const agent1 = genKeypair();
-    const agent2 = genKeypair();
-    verifyEmail(db, 'agent1', 'a1@example.com');
-    verifyEmail(db, 'agent2', 'a2@example.com');
-    registerAgent(db, 'agent1', agent1.publicKeyBase64, 'a1@example.com', '');
-    registerAgent(db, 'agent2', agent2.publicKeyBase64, 'a2@example.com', '');
-
-    const pending = listPendingRegistrations(db);
-    assert.equal(pending.length, 2);
-    assert.ok(pending.some((p) => p.name === 'agent1'));
-    assert.ok(pending.some((p) => p.name === 'agent2'));
-
-    // Approve one and re-check
-    approveAgent(db, 'agent1', 'bmo');
-    const pending2 = listPendingRegistrations(db);
-    assert.equal(pending2.length, 1);
-    assert.equal(pending2[0]!.name, 'agent2');
-
+    const result = listPendingRegistrations(db);
+    assert.equal(result.status, 410);
     db.close();
   });
 
-  // Step 8: Approved agent can authenticate
-  it('step 8: approved agent passes authentication', () => {
+  // Step 8: Auto-approved agent can authenticate
+  it('step 8: auto-approved agent passes authentication', () => {
     const db = withDb();
-    const bmo = genKeypair();
     const atlas = genKeypair();
 
-    seedAdmins(db, [{ name: 'bmo', publicKeyBase64: bmo.publicKeyBase64 }]);
     verifyEmail(db, 'atlas', 'atlas@example.com');
     registerAgent(db, 'atlas', atlas.publicKeyBase64, 'atlas@example.com', '');
-    approveAgent(db, 'atlas', 'bmo');
 
-    // Auth should work now
+    // Auth should work now (auto-approved, no admin approval needed)
     const now = Date.now();
     const timestamp = new Date(now).toISOString();
     const bodyHash = hashBody('');
@@ -248,16 +228,13 @@ describe('t-058: Agent revocation: immediate block + broadcast notification', ()
     return db;
   }
 
-  // Step 1: Register and approve "rogue"
-  it('step 1: register and approve rogue agent', () => {
+  // Step 1: Register "rogue" (auto-approved in v3)
+  it('step 1: register rogue agent (auto-approved)', () => {
     const db = withDb();
-    const admin = genKeypair();
     const rogue = genKeypair();
 
-    seedAdmins(db, [{ name: 'admin', publicKeyBase64: admin.publicKeyBase64 }]);
     verifyEmail(db, 'rogue', 'rogue@example.com');
     registerAgent(db, 'rogue', rogue.publicKeyBase64, 'rogue@example.com', '');
-    approveAgent(db, 'rogue', 'admin');
 
     const agent = getAgent(db, 'rogue');
     assert.equal(agent?.status, 'active');
@@ -265,16 +242,13 @@ describe('t-058: Agent revocation: immediate block + broadcast notification', ()
     db.close();
   });
 
-  // Step 2: Verify "rogue" can authenticate
+  // Step 2: Verify "rogue" can authenticate (auto-approved)
   it('step 2: active rogue agent can authenticate', () => {
     const db = withDb();
-    const admin = genKeypair();
     const rogue = genKeypair();
 
-    seedAdmins(db, [{ name: 'admin', publicKeyBase64: admin.publicKeyBase64 }]);
     verifyEmail(db, 'rogue', 'rogue@example.com');
     registerAgent(db, 'rogue', rogue.publicKeyBase64, 'rogue@example.com', '');
-    approveAgent(db, 'rogue', 'admin');
 
     const now = Date.now();
     const timestamp = new Date(now).toISOString();
@@ -299,7 +273,6 @@ describe('t-058: Agent revocation: immediate block + broadcast notification', ()
     seedAdmins(db, [{ name: 'admin', publicKeyBase64: admin.publicKeyBase64 }]);
     verifyEmail(db, 'rogue', 'rogue@example.com');
     registerAgent(db, 'rogue', rogue.publicKeyBase64, 'rogue@example.com', '');
-    approveAgent(db, 'rogue', 'admin');
 
     const result = revokeAgent(db, 'rogue', 'admin');
     assert.equal(result.ok, true);
@@ -317,7 +290,6 @@ describe('t-058: Agent revocation: immediate block + broadcast notification', ()
     seedAdmins(db, [{ name: 'admin', publicKeyBase64: admin.publicKeyBase64 }]);
     verifyEmail(db, 'rogue', 'rogue@example.com');
     registerAgent(db, 'rogue', rogue.publicKeyBase64, 'rogue@example.com', '');
-    approveAgent(db, 'rogue', 'admin');
     revokeAgent(db, 'rogue', 'admin');
 
     const now = Date.now();
@@ -345,7 +317,6 @@ describe('t-058: Agent revocation: immediate block + broadcast notification', ()
     seedAdmins(db, [{ name: 'admin', publicKeyBase64: admin.publicKeyBase64 }]);
     verifyEmail(db, 'rogue', 'rogue@example.com');
     registerAgent(db, 'rogue', rogue.publicKeyBase64, 'rogue@example.com', '');
-    approveAgent(db, 'rogue', 'admin');
     revokeAgent(db, 'rogue', 'admin');
 
     const broadcasts = listBroadcasts(db, 'revocation');
@@ -368,7 +339,6 @@ describe('t-058: Agent revocation: immediate block + broadcast notification', ()
     seedAdmins(db, [{ name: 'admin', publicKeyBase64: admin.publicKeyBase64 }]);
     verifyEmail(db, 'rogue', 'rogue@example.com');
     registerAgent(db, 'rogue', rogue.publicKeyBase64, 'rogue@example.com', '');
-    approveAgent(db, 'rogue', 'admin');
     revokeAgent(db, 'rogue', 'admin');
 
     // Any agent can list broadcasts
@@ -439,19 +409,10 @@ describe('Registry: edge cases', () => {
     db.close();
   });
 
-  it('listAgents returns all agents', () => {
+  it('listAgents returns 410 Gone (removed in v3)', () => {
     const db = withDb();
-    const admin = genKeypair();
-    seedAdmins(db, [{ name: 'admin', publicKeyBase64: admin.publicKeyBase64 }]);
-
-    const a1 = genKeypair();
-    verifyEmail(db, 'agent1', 'a1@example.com');
-    registerAgent(db, 'agent1', a1.publicKeyBase64, 'a1@example.com', '');
-
-    const agents = listAgents(db);
-    assert.ok(agents.length >= 2); // admin + agent1
-    assert.ok(agents.some((a) => a.name === 'agent1'));
-
+    const result = listAgents(db);
+    assert.equal((result as any).status, 410);
     db.close();
   });
 
@@ -463,6 +424,293 @@ describe('Registry: edge cases', () => {
     const result = revokeAgent(db, 'ghost', 'admin');
     assert.equal(result.ok, false);
     assert.equal(result.status, 404);
+
+    db.close();
+  });
+});
+
+// ================================================================
+// t-095: Registration auto-approves with valid input
+// ================================================================
+
+describe('t-095: Registration auto-approves with valid input', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: Verify email for agent
+  it('step 1: verify email for test-agent', () => {
+    const db = withDb();
+    verifyEmail(db, 'test-agent', 'test@example.com');
+    const entry = db.prepare('SELECT verified FROM email_verifications WHERE agent_name = ?')
+      .get('test-agent') as any;
+    assert.equal(entry.verified, 1);
+    db.close();
+  });
+
+  // Step 2: Register → should get status 'active' immediately
+  it('step 2: registration returns status active (not pending)', () => {
+    const db = withDb();
+    const agent = genKeypair();
+    verifyEmail(db, 'test-agent', 'test@example.com');
+
+    const result = registerAgent(db, 'test-agent', agent.publicKeyBase64, 'test@example.com', 'https://test.example.com/inbox');
+    assert.equal(result.ok, true);
+    assert.equal(result.agent?.status, 'active');
+
+    db.close();
+  });
+
+  // Step 3: Verify via getAgent → status is 'active'
+  it('step 3: getAgent confirms status is active', () => {
+    const db = withDb();
+    const agent = genKeypair();
+    verifyEmail(db, 'test-agent', 'test@example.com');
+    registerAgent(db, 'test-agent', agent.publicKeyBase64, 'test@example.com', 'https://test.example.com/inbox');
+
+    const result = getAgent(db, 'test-agent');
+    assert.ok(result);
+    assert.equal(result.status, 'active');
+
+    db.close();
+  });
+});
+
+// ================================================================
+// t-096: Registration rejects duplicate email and public key
+// ================================================================
+
+describe('t-096: Registration rejects duplicate email and public key', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: Register agent-a with email a@test.com and key-a
+  it('step 1: register agent-a succeeds', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    verifyEmail(db, 'agent-a', 'a@test.com');
+    const result = registerAgent(db, 'agent-a', agentA.publicKeyBase64, 'a@test.com', 'https://a.example.com');
+    assert.equal(result.ok, true);
+    assert.equal(result.agent?.status, 'active');
+    db.close();
+  });
+
+  // Step 2: Register agent-b with same email → 409
+  it('step 2: duplicate email rejected with 409', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentB = genKeypair();
+    verifyEmail(db, 'agent-a', 'a@test.com');
+    registerAgent(db, 'agent-a', agentA.publicKeyBase64, 'a@test.com', 'https://a.example.com');
+
+    verifyEmail(db, 'agent-b', 'a@test.com');
+    const result = registerAgent(db, 'agent-b', agentB.publicKeyBase64, 'a@test.com', 'https://b.example.com');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 409);
+    assert.match(result.error!, /email/i);
+
+    db.close();
+  });
+
+  // Step 3: Register agent-c with same public key → 409
+  it('step 3: duplicate public key rejected with 409', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    verifyEmail(db, 'agent-a', 'a@test.com');
+    registerAgent(db, 'agent-a', agentA.publicKeyBase64, 'a@test.com', 'https://a.example.com');
+
+    verifyEmail(db, 'agent-c', 'c@test.com');
+    const result = registerAgent(db, 'agent-c', agentA.publicKeyBase64, 'c@test.com', 'https://c.example.com');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 409);
+    assert.match(result.error!, /public.?key/i);
+
+    db.close();
+  });
+
+  // Step 4: Register agent-d with same endpoint → succeeds (endpoint not unique-checked)
+  it('step 4: duplicate endpoint allowed', () => {
+    const db = withDb();
+    const agentA = genKeypair();
+    const agentD = genKeypair();
+    verifyEmail(db, 'agent-a', 'a@test.com');
+    registerAgent(db, 'agent-a', agentA.publicKeyBase64, 'a@test.com', 'https://a.example.com');
+
+    verifyEmail(db, 'agent-d', 'd@test.com');
+    const result = registerAgent(db, 'agent-d', agentD.publicKeyBase64, 'd@test.com', 'https://a.example.com');
+    assert.equal(result.ok, true);
+    assert.equal(result.agent?.status, 'active');
+
+    db.close();
+  });
+});
+
+// ================================================================
+// t-097: Removed admin endpoints return 410
+// ================================================================
+
+describe('t-097: Removed admin endpoints return 410', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: POST /registry/agents/:name/approve → 410 Gone
+  it('step 1: approveAgent returns 410 Gone', () => {
+    const db = withDb();
+    const result = approveAgent(db, 'test-agent', 'admin');
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 410);
+    db.close();
+  });
+
+  // Step 2: GET /admin/pending → 410 Gone
+  it('step 2: listPendingRegistrations returns 410 Gone', () => {
+    const db = withDb();
+    const result = listPendingRegistrations(db);
+    // After v3 changes, this should return a result indicating 410
+    assert.equal((result as any).status, 410);
+    db.close();
+  });
+});
+
+// ================================================================
+// t-098: Directory listing removed + lookup requires auth
+// ================================================================
+
+describe('t-098: Directory listing removed + lookup requires auth', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: GET /registry/agents → 410 Gone
+  it('step 1: listAgents returns 410 Gone', () => {
+    const db = withDb();
+    const result = listAgents(db);
+    assert.equal((result as any).status, 410);
+    db.close();
+  });
+
+  // Step 2: lookupAgent for non-existent agent returns null
+  it('step 2: lookupAgent for non-existent agent returns null', () => {
+    const db = withDb();
+    const result = lookupAgent(db, 'ghost');
+    assert.equal(result, null);
+    db.close();
+  });
+
+  // Step 3: lookupAgent with valid agent returns details
+  it('step 3: lookupAgent returns agent details for registered agent', () => {
+    const db = withDb();
+    const agent = genKeypair();
+    verifyEmail(db, 'bmo', 'bmo@test.com');
+    registerAgent(db, 'bmo', agent.publicKeyBase64, 'bmo@test.com', 'https://bmo.example.com');
+
+    const result = lookupAgent(db, 'bmo');
+    assert.ok(result);
+    assert.equal(result.name, 'bmo');
+    assert.equal(result.publicKey, agent.publicKeyBase64);
+    assert.equal(result.status, 'active');
+
+    db.close();
+  });
+});
+
+// ================================================================
+// t-099: Directory lookup omits endpoint from response
+// ================================================================
+
+describe('t-099: Directory lookup omits endpoint from response', () => {
+  let cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
+    cleanupDirs = [];
+  });
+
+  function withDb() {
+    const { db, dir } = setupDb();
+    cleanupDirs.push(dir);
+    return db;
+  }
+
+  // Step 1: Register agent with endpoint
+  it('step 1: register agent with endpoint succeeds', () => {
+    const db = withDb();
+    const agent = genKeypair();
+    verifyEmail(db, 'atlas', 'atlas@test.com');
+    const result = registerAgent(db, 'atlas', agent.publicKeyBase64, 'atlas@test.com', 'https://example.com/p2p');
+    assert.equal(result.ok, true);
+    assert.equal(result.agent?.status, 'active');
+    db.close();
+  });
+
+  // Step 2: lookupAgent returns only name, publicKey, status
+  it('step 2: lookupAgent returns name, publicKey, status', () => {
+    const db = withDb();
+    const agent = genKeypair();
+    verifyEmail(db, 'atlas', 'atlas@test.com');
+    registerAgent(db, 'atlas', agent.publicKeyBase64, 'atlas@test.com', 'https://example.com/p2p');
+
+    const result = lookupAgent(db, 'atlas');
+    assert.ok(result);
+    assert.equal(result.name, 'atlas');
+    assert.ok(result.publicKey);
+    assert.equal(result.status, 'active');
+
+    db.close();
+  });
+
+  // Step 3: Response does NOT contain endpoint or ownerEmail
+  it('step 3: lookupAgent response omits endpoint and ownerEmail', () => {
+    const db = withDb();
+    const agent = genKeypair();
+    verifyEmail(db, 'atlas', 'atlas@test.com');
+    registerAgent(db, 'atlas', agent.publicKeyBase64, 'atlas@test.com', 'https://example.com/p2p');
+
+    const result = lookupAgent(db, 'atlas') as any;
+    assert.ok(result);
+    assert.equal(result.endpoint, undefined, 'endpoint should not be in response');
+    assert.equal(result.ownerEmail, undefined, 'ownerEmail should not be in response');
+    assert.equal(result.emailVerified, undefined, 'emailVerified should not be in response');
+    assert.equal(result.createdAt, undefined, 'createdAt should not be in response');
+    assert.equal(result.approvedBy, undefined, 'approvedBy should not be in response');
 
     db.close();
   });

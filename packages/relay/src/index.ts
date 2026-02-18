@@ -13,11 +13,13 @@ import {
   registerAgent,
   listAgents,
   getAgent,
+  lookupAgent,
   approveAgent,
   revokeAgent,
 } from './routes/registry.js';
 import {
   requestContact,
+  requestContactBatch,
   listPendingRequests,
   acceptContact,
   denyContact,
@@ -184,27 +186,26 @@ const server = createServer(async (req, res) => {
       return json(res, result.status || (result.ok ? 201 : 400), result);
     }
 
-    // GET /registry/agents — list all (public)
+    // GET /registry/agents — REMOVED in v3 (410 Gone)
     if (path === '/registry/agents' && method === 'GET') {
-      return json(res, 200, listAgents(db));
+      return json(res, 410, { ok: false, error: 'Gone — public directory listing removed in v3' });
     }
 
-    // GET /registry/agents/:name — get one (public)
+    // GET /registry/agents/:name — lookup (authenticated, v3)
     let params = matchPath('/registry/agents/:name', path);
     if (params && method === 'GET') {
-      const agent = getAgent(db, params.name);
+      const a = auth();
+      if (!a.ok) return json(res, a.status || 401, { error: a.error });
+      const agent = lookupAgent(db, params.name);
       return agent
         ? json(res, 200, agent)
         : json(res, 404, { error: 'Agent not found' });
     }
 
-    // POST /registry/agents/:name/approve — admin only
+    // POST /registry/agents/:name/approve — REMOVED in v3 (410 Gone)
     params = matchPath('/registry/agents/:name/approve', path);
     if (params && method === 'POST') {
-      const a = auth();
-      if (!a.ok) return json(res, a.status || 401, { error: a.error });
-      const result = approveAgent(db, params.name, a.agent!);
-      return json(res, result.status || (result.ok ? 200 : 400), result);
+      return json(res, 410, { ok: false, error: 'Gone — admin approval removed in v3, registration is auto-approved' });
     }
 
     // POST /registry/agents/:name/revoke — admin only
@@ -220,12 +221,16 @@ const server = createServer(async (req, res) => {
     // CONTACTS ROUTES
     // ==========================================================
 
-    // POST /contacts/request — request a contact (authenticated)
+    // POST /contacts/request — request a contact (authenticated, batch supported)
     if (path === '/contacts/request' && method === 'POST') {
       const a = auth();
       if (!a.ok) return json(res, a.status || 401, { error: a.error });
       const data = parseBody();
       if (!data) return json(res, 400, { error: 'Invalid JSON' });
+      if (Array.isArray(data.to)) {
+        const result = requestContactBatch(db, a.agent!, data.to);
+        return json(res, result.status, result);
+      }
       const result = requestContact(db, a.agent!, data.to, data.greeting);
       return json(res, result.status || (result.ok ? 200 : 400), result);
     }
@@ -284,36 +289,24 @@ const server = createServer(async (req, res) => {
       return json(res, result.status || (result.ok ? 200 : 400), result);
     }
 
-    // GET /presence/batch — batch presence query (public)
+    // GET /presence/batch — REMOVED in v3 (410 Gone)
     if (path === '/presence/batch' && method === 'GET') {
-      const agentsParam = urlObj.searchParams.get('agents') || '';
-      const agents = agentsParam
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      return json(res, 200, batchPresence(db, agents));
+      return json(res, 410, { ok: false, error: 'Gone — presence queries removed in v3, use GET /contacts instead' });
     }
 
-    // GET /presence/:agent — single presence (public)
+    // GET /presence/:agent — REMOVED in v3 (410 Gone)
     params = matchPath('/presence/:agent', path);
     if (params && method === 'GET') {
-      const info = getPresence(db, params.agent);
-      return info
-        ? json(res, 200, info)
-        : json(res, 404, { error: 'Agent not found' });
+      return json(res, 410, { ok: false, error: 'Gone — presence queries removed in v3, use GET /contacts instead' });
     }
 
     // ==========================================================
     // ADMIN ROUTES
     // ==========================================================
 
-    // GET /admin/pending — list pending registrations (admin only)
+    // GET /admin/pending — REMOVED in v3 (410 Gone)
     if (path === '/admin/pending' && method === 'GET') {
-      const a = auth();
-      if (!a.ok) return json(res, a.status || 401, { error: a.error });
-      if (!isAdmin(a.agent!))
-        return json(res, 403, { error: 'Not an admin' });
-      return json(res, 200, listPendingRegistrations(db));
+      return json(res, 410, { ok: false, error: 'Gone — admin approval removed in v3, registration is auto-approved' });
     }
 
     // GET /admin/keys — list admin keys (public)

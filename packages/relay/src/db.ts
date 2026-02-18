@@ -15,7 +15,7 @@ let _dbPath: string | null = null;
 /**
  * Current schema version. Increment when schema changes.
  */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /**
  * Full v2 schema DDL.
@@ -113,6 +113,8 @@ const V2_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_nonces_seen_at ON nonces(seen_at);
   CREATE INDEX IF NOT EXISTS idx_broadcasts_created_at ON broadcasts(created_at);
   CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+  CREATE INDEX IF NOT EXISTS idx_agents_email ON agents(owner_email);
+  CREATE INDEX IF NOT EXISTS idx_agents_pubkey ON agents(public_key);
   CREATE INDEX IF NOT EXISTS idx_rate_limits_window ON rate_limits(window_start);
 `;
 
@@ -157,6 +159,21 @@ const V3_GROUPS_SCHEMA = `
 `;
 
 /**
+ * V4 additive schema — contact redesign (blocks table, denial tracking).
+ */
+const V4_CONTACTS_SCHEMA = `
+  -- Blocks — directional block records (blocker blocks blocked)
+  CREATE TABLE IF NOT EXISTS blocks (
+    blocker TEXT NOT NULL,
+    blocked TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (blocker, blocked),
+    FOREIGN KEY (blocker) REFERENCES agents(name),
+    FOREIGN KEY (blocked) REFERENCES agents(name)
+  );
+`;
+
+/**
  * Initialize a new database at the given path with v2 schema.
  * Returns the database instance.
  */
@@ -170,9 +187,17 @@ export function initializeDatabase(dbPath: string): Database.Database {
   db.pragma('journal_mode = DELETE'); // Safe on all filesystems
   db.pragma('foreign_keys = ON');
 
-  // Apply schema (additive — v2 base + v3 groups)
+  // Apply schema (additive — v2 base + v3 groups + v4 contacts)
   db.exec(V2_SCHEMA);
   db.exec(V3_GROUPS_SCHEMA);
+  db.exec(V4_CONTACTS_SCHEMA);
+
+  // V4: Add denial_count column to contacts (ALTER TABLE, idempotent)
+  try {
+    db.exec('ALTER TABLE contacts ADD COLUMN denial_count INTEGER DEFAULT 0');
+  } catch {
+    // Column already exists — ignore
+  }
 
   // Track schema version
   db.exec(`

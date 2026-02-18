@@ -1,7 +1,7 @@
 /**
  * Tests for presence system (t-061).
  *
- * t-061: Presence heartbeat, offline detection, batch query
+ * t-061: Presence heartbeat + v3 changes (getPresence/batchPresence → 410)
  */
 
 import { describe, it, afterEach } from 'node:test';
@@ -30,7 +30,7 @@ function genKeypair() {
   return { publicKeyBase64: Buffer.from(pubDer).toString('base64') };
 }
 
-/** Register and approve an agent (admin-fast-path for tests). */
+/** Register an active agent. */
 function createActiveAgent(
   db: ReturnType<typeof initializeDatabase>,
   name: string,
@@ -41,9 +41,6 @@ function createActiveAgent(
     "INSERT INTO agents (name, public_key, endpoint, email_verified, status, approved_by, approved_at) VALUES (?, ?, ?, 1, 'active', 'test-admin', datetime('now'))"
   ).run(name, publicKeyBase64, endpoint || null);
 }
-
-/** 20 minutes in ms — the offline threshold (2x 10-minute heartbeat). */
-const OFFLINE_THRESHOLD_MS = 20 * 60 * 1000;
 
 // ================================================================
 // t-061: Presence heartbeat, offline detection, batch query
@@ -63,7 +60,7 @@ describe('t-061: Presence heartbeat, offline detection, batch query', () => {
     return db;
   }
 
-  // Step 1: Register and approve agent 'alpha'
+  // Step 1: Register agent
   it('step 1: register and approve alpha', () => {
     const db = withDb();
     const alpha = genKeypair();
@@ -75,7 +72,7 @@ describe('t-061: Presence heartbeat, offline detection, batch query', () => {
     db.close();
   });
 
-  // Step 2: PUT /presence as alpha with endpoint
+  // Step 2: Heartbeat updates last_seen and endpoint
   it('step 2: heartbeat updates last_seen and endpoint', () => {
     const db = withDb();
     const alpha = genKeypair();
@@ -85,7 +82,6 @@ describe('t-061: Presence heartbeat, offline detection, batch query', () => {
     const result = updatePresence(db, 'alpha', 'https://alpha.example.com/network/inbox', now);
     assert.equal(result.ok, true);
 
-    // Verify last_seen is set
     const row = db.prepare("SELECT last_seen, endpoint FROM agents WHERE name = 'alpha'").get() as any;
     assert.ok(row.last_seen);
     assert.equal(row.endpoint, 'https://alpha.example.com/network/inbox');
@@ -93,64 +89,24 @@ describe('t-061: Presence heartbeat, offline detection, batch query', () => {
     db.close();
   });
 
-  // Step 3: GET /presence/alpha → online with endpoint
-  it('step 3: get presence shows online with endpoint', () => {
+  // Step 3: getPresence returns 410 in v3
+  it('step 3: getPresence returns 410 Gone', () => {
     const db = withDb();
-    const alpha = genKeypair();
-    createActiveAgent(db, 'alpha', alpha.publicKeyBase64);
-
-    const now = Date.now();
-    updatePresence(db, 'alpha', 'https://alpha.example.com/network/inbox', now);
-
-    const presence = getPresence(db, 'alpha', now);
-    assert.ok(presence);
-    assert.equal(presence.online, true);
-    assert.equal(presence.endpoint, 'https://alpha.example.com/network/inbox');
-    assert.ok(presence.lastSeen);
-
+    const result = getPresence(db, 'alpha');
+    assert.equal((result as any).status, 410);
     db.close();
   });
 
-  // Step 4-5: Simulate staleness → offline
-  it('steps 4-5: stale last_seen → offline', () => {
+  // Step 4: batchPresence returns 410 in v3
+  it('step 4: batchPresence returns 410 Gone', () => {
     const db = withDb();
-    const alpha = genKeypair();
-    createActiveAgent(db, 'alpha', alpha.publicKeyBase64);
-
-    const now = Date.now();
-    updatePresence(db, 'alpha', 'https://alpha.example.com/network/inbox', now);
-
-    // 21 minutes later (past 2x 10-min threshold)
-    const future = now + OFFLINE_THRESHOLD_MS + 60_000;
-    const presence = getPresence(db, 'alpha', future);
-    assert.ok(presence);
-    assert.equal(presence.online, false);
-
+    const result = batchPresence(db, ['alpha', 'beta']);
+    assert.equal((result as any).status, 410);
     db.close();
   });
 
-  // Step 6: PUT /presence again → back online
-  it('step 6: fresh heartbeat brings agent back online', () => {
-    const db = withDb();
-    const alpha = genKeypair();
-    createActiveAgent(db, 'alpha', alpha.publicKeyBase64);
-
-    const now = Date.now();
-    updatePresence(db, 'alpha', 'https://alpha.example.com/network/inbox', now);
-
-    // Go stale
-    const staleTime = now + OFFLINE_THRESHOLD_MS + 60_000;
-    assert.equal(getPresence(db, 'alpha', staleTime)!.online, false);
-
-    // Fresh heartbeat
-    updatePresence(db, 'alpha', 'https://alpha.example.com/network/inbox', staleTime);
-    assert.equal(getPresence(db, 'alpha', staleTime)!.online, true);
-
-    db.close();
-  });
-
-  // Step 7: Register beta, send heartbeat → online
-  it('step 7: second agent beta heartbeat → online', () => {
+  // Step 5: Heartbeat verifies last_seen directly in DB
+  it('step 5: multiple heartbeats update last_seen correctly', () => {
     const db = withDb();
     const alpha = genKeypair();
     const beta = genKeypair();
@@ -161,51 +117,17 @@ describe('t-061: Presence heartbeat, offline detection, batch query', () => {
     updatePresence(db, 'alpha', 'https://alpha.example.com/inbox', now);
     updatePresence(db, 'beta', 'https://beta.example.com/inbox', now);
 
-    const betaPresence = getPresence(db, 'beta', now);
-    assert.ok(betaPresence);
-    assert.equal(betaPresence.online, true);
-
-    db.close();
-  });
-
-  // Step 8: GET /presence/batch?agents=alpha,beta
-  it('step 8: batch presence for alpha and beta', () => {
-    const db = withDb();
-    const alpha = genKeypair();
-    const beta = genKeypair();
-    createActiveAgent(db, 'alpha', alpha.publicKeyBase64);
-    createActiveAgent(db, 'beta', beta.publicKeyBase64);
-
-    const now = Date.now();
-    updatePresence(db, 'alpha', 'https://alpha.example.com/inbox', now);
-    updatePresence(db, 'beta', 'https://beta.example.com/inbox', now);
-
-    const batch = batchPresence(db, ['alpha', 'beta'], now);
-    assert.equal(batch.length, 2);
-
-    const alphaInfo = batch.find((p) => p.agent === 'alpha');
-    const betaInfo = batch.find((p) => p.agent === 'beta');
-    assert.ok(alphaInfo);
-    assert.ok(betaInfo);
-    assert.equal(alphaInfo.online, true);
-    assert.equal(betaInfo.online, true);
-
-    db.close();
-  });
-
-  // Step 9: GET /presence/nonexistent → null
-  it('step 9: nonexistent agent returns null', () => {
-    const db = withDb();
-
-    const presence = getPresence(db, 'nonexistent');
-    assert.equal(presence, null);
+    const alphaRow = db.prepare("SELECT last_seen FROM agents WHERE name = 'alpha'").get() as any;
+    const betaRow = db.prepare("SELECT last_seen FROM agents WHERE name = 'beta'").get() as any;
+    assert.ok(alphaRow.last_seen);
+    assert.ok(betaRow.last_seen);
 
     db.close();
   });
 });
 
 // ================================================================
-// Additional presence coverage
+// Presence: edge cases
 // ================================================================
 
 describe('Presence: edge cases', () => {
@@ -244,62 +166,24 @@ describe('Presence: edge cases', () => {
     db.close();
   });
 
-  it('revoked agent presence returns null', () => {
+  it('getPresence returns 410 for any agent', () => {
     const db = withDb();
-    const agent = genKeypair();
-    db.prepare(
-      "INSERT INTO agents (name, public_key, status) VALUES (?, ?, 'revoked')"
-    ).run('revoked', agent.publicKeyBase64);
-
-    const presence = getPresence(db, 'revoked');
-    assert.equal(presence, null);
+    const result = getPresence(db, 'any-agent');
+    assert.equal((result as any).status, 410);
     db.close();
   });
 
-  it('agent with no heartbeat shows offline', () => {
+  it('batchPresence returns 410 for any list', () => {
     const db = withDb();
-    const agent = genKeypair();
-    createActiveAgent(db, 'fresh', agent.publicKeyBase64);
-
-    const presence = getPresence(db, 'fresh');
-    assert.ok(presence);
-    assert.equal(presence.online, false);
-    assert.equal(presence.lastSeen, null);
-
+    const result = batchPresence(db, ['a', 'b']);
+    assert.equal((result as any).status, 410);
     db.close();
   });
 
-  it('batch with nonexistent agents returns offline entries', () => {
+  it('batchPresence returns 410 for empty list', () => {
     const db = withDb();
-    const batch = batchPresence(db, ['ghost1', 'ghost2']);
-    assert.equal(batch.length, 2);
-    assert.equal(batch[0]!.online, false);
-    assert.equal(batch[1]!.online, false);
-    db.close();
-  });
-
-  it('batch with empty list returns empty array', () => {
-    const db = withDb();
-    const batch = batchPresence(db, []);
-    assert.equal(batch.length, 0);
-    db.close();
-  });
-
-  it('exactly at threshold boundary is still online', () => {
-    const db = withDb();
-    const agent = genKeypair();
-    createActiveAgent(db, 'edge', agent.publicKeyBase64);
-
-    const now = Date.now();
-    updatePresence(db, 'edge', undefined, now);
-
-    // Exactly at 20 min = still online (<=)
-    const atThreshold = now + OFFLINE_THRESHOLD_MS;
-    assert.equal(getPresence(db, 'edge', atThreshold)!.online, true);
-
-    // 1ms past = offline
-    assert.equal(getPresence(db, 'edge', atThreshold + 1)!.online, false);
-
+    const result = batchPresence(db, []);
+    assert.equal((result as any).status, 410);
     db.close();
   });
 });

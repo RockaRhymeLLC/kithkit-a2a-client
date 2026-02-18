@@ -94,24 +94,12 @@ export function verifyBroadcastSignature(
 }
 
 /**
- * List pending agent registrations (admin only).
+ * List pending agent registrations — REMOVED in v3.
+ * Registration is now auto-approved; there are no pending registrations.
+ * Returns 410 Gone.
  */
-export function listPendingRegistrations(db: Database.Database): Array<{
-  name: string;
-  ownerEmail: string | null;
-  endpoint: string | null;
-  createdAt: string;
-}> {
-  const rows = db.prepare(
-    "SELECT name, owner_email, endpoint, created_at FROM agents WHERE status = 'pending' ORDER BY created_at ASC"
-  ).all() as Array<{ name: string; owner_email: string | null; endpoint: string | null; created_at: string }>;
-
-  return rows.map((r) => ({
-    name: r.name,
-    ownerEmail: r.owner_email,
-    endpoint: r.endpoint,
-    createdAt: r.created_at,
-  }));
+export function listPendingRegistrations(_db: Database.Database): { ok: false; status: 410; error: string } {
+  return { ok: false, status: 410, error: 'Gone — admin approval removed in v3, registration is auto-approved' };
 }
 
 /**

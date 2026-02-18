@@ -1,10 +1,10 @@
 /**
  * Contacts routes — request, accept, deny, remove, list.
  *
- * POST   /contacts/request        — Send contact request
- * GET    /contacts/pending         — List pending requests (incoming)
+ * POST   /contacts/request        — Send contact request (v3: no greeting, batch support)
+ * GET    /contacts/pending         — List pending requests (incoming, 30-day expiry filter)
  * POST   /contacts/:agent/accept   — Accept a contact request
- * POST   /contacts/:agent/deny     — Deny a contact request
+ * POST   /contacts/:agent/deny     — Deny a contact request (tracks denial count, auto-blocks at 3)
  * DELETE /contacts/:agent           — Remove an established contact
  * GET    /contacts                  — List active contacts
  *
@@ -14,13 +14,31 @@
 
 import type Database from 'better-sqlite3';
 
-/** Maximum greeting length in chars. */
-const MAX_GREETING_LENGTH = 500;
+/** Rate limit: max contact requests per hour per sender. */
+const RATE_LIMIT_MAX = 100;
+const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+/** Pending request expiry: 30 days. */
+const PENDING_EXPIRY_DAYS = 30;
+
+/** Auto-block threshold: deny 3 times → auto-block. */
+const AUTO_BLOCK_THRESHOLD = 3;
 
 export interface ContactResult {
   ok: boolean;
   status?: number;
   error?: string;
+  contact?: {
+    agent: string;
+    endpoint: string | null;
+    publicKey: string;
+  };
+}
+
+export interface BatchContactResult {
+  ok: boolean;
+  status: number;
+  results: Array<{ to: string } & ContactResult>;
 }
 
 export interface ContactInfo {
@@ -28,11 +46,13 @@ export interface ContactInfo {
   publicKey: string;
   endpoint: string | null;
   since: string;
+  online: boolean;
+  lastSeen: string | null;
 }
 
 export interface PendingRequest {
   from: string;
-  greeting: string | null;
+  requesterEmail: string | null;
   createdAt: string;
 }
 
@@ -54,7 +74,66 @@ function isActiveAgent(db: Database.Database, name: string): boolean {
 }
 
 /**
+ * Check if `blocker` has blocked `blocked`.
+ */
+function isBlocked(db: Database.Database, blocker: string, blocked: string): boolean {
+  const row = db.prepare(
+    'SELECT 1 FROM blocks WHERE blocker = ? AND blocked = ?'
+  ).get(blocker, blocked);
+  return !!row;
+}
+
+/**
+ * Check rate limit for contact requests. Returns true if under limit.
+ */
+function checkRateLimit(db: Database.Database, agent: string): boolean {
+  const key = `contacts:request:${agent}`;
+  const now = Date.now();
+  const windowStart = new Date(now - RATE_LIMIT_WINDOW_MS).toISOString();
+
+  const row = db.prepare(
+    'SELECT count, window_start FROM rate_limits WHERE key = ?'
+  ).get(key) as { count: number; window_start: string } | undefined;
+
+  if (!row) {
+    // No record — create one
+    db.prepare(
+      'INSERT INTO rate_limits (key, count, window_start) VALUES (?, 1, ?)'
+    ).run(key, new Date(now).toISOString());
+    return true;
+  }
+
+  // Check if window has expired
+  if (row.window_start < windowStart) {
+    // Reset window
+    db.prepare(
+      'UPDATE rate_limits SET count = 1, window_start = ? WHERE key = ?'
+    ).run(new Date(now).toISOString(), key);
+    return true;
+  }
+
+  // Within window — check count
+  if (row.count >= RATE_LIMIT_MAX) {
+    return false;
+  }
+
+  // Increment
+  db.prepare('UPDATE rate_limits SET count = count + 1 WHERE key = ?').run(key);
+  return true;
+}
+
+/**
+ * Check if a pending request has expired (older than 30 days).
+ */
+function isPendingExpired(createdAt: string): boolean {
+  const created = new Date(createdAt).getTime();
+  const expiry = PENDING_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
+  return Date.now() - created > expiry;
+}
+
+/**
  * Send a contact request from `fromAgent` to `toAgent`.
+ * V3: No greeting allowed (canned notifications only).
  */
 export function requestContact(
   db: Database.Database,
@@ -62,6 +141,11 @@ export function requestContact(
   toAgent: string,
   greeting?: string,
 ): ContactResult {
+  // V3: Greeting not allowed
+  if (greeting !== undefined) {
+    return { ok: false, status: 400, error: 'Greeting not allowed — contact requests are canned notifications in v3' };
+  }
+
   // Can't request yourself
   if (fromAgent === toAgent) {
     return { ok: false, status: 400, error: 'Cannot add yourself as a contact' };
@@ -75,42 +159,77 @@ export function requestContact(
     return { ok: false, status: 404, error: 'Target agent not found or not active' };
   }
 
-  // Validate greeting length
-  if (greeting && greeting.length > MAX_GREETING_LENGTH) {
-    return { ok: false, status: 400, error: `Greeting too long (max ${MAX_GREETING_LENGTH} chars)` };
+  // Check if blocked
+  if (isBlocked(db, toAgent, fromAgent)) {
+    return { ok: false, status: 403, error: 'Blocked by target agent' };
+  }
+
+  // Rate limit check
+  if (!checkRateLimit(db, fromAgent)) {
+    return { ok: false, status: 429, error: 'Rate limit exceeded — max 100 contact requests per hour' };
   }
 
   const { agent_a, agent_b } = orderPair(fromAgent, toAgent);
 
   // Check for existing contact (any status)
   const existing = db.prepare(
-    'SELECT status FROM contacts WHERE agent_a = ? AND agent_b = ?'
-  ).get(agent_a, agent_b) as { status: string } | undefined;
+    'SELECT status, created_at FROM contacts WHERE agent_a = ? AND agent_b = ?'
+  ).get(agent_a, agent_b) as { status: string; created_at: string } | undefined;
 
   if (existing) {
     if (existing.status === 'active') {
       return { ok: false, status: 409, error: 'Already contacts' };
     }
     if (existing.status === 'pending') {
-      return { ok: false, status: 409, error: 'Contact request already pending' };
+      // Check if expired
+      if (isPendingExpired(existing.created_at)) {
+        // Expired — delete and allow re-request
+        db.prepare('DELETE FROM contacts WHERE agent_a = ? AND agent_b = ?').run(agent_a, agent_b);
+      } else {
+        return { ok: false, status: 409, error: 'Contact request already pending' };
+      }
     }
-    // If denied or removed, allow re-request by replacing the row
-    db.prepare(
-      'DELETE FROM contacts WHERE agent_a = ? AND agent_b = ?'
-    ).run(agent_a, agent_b);
+    if (existing.status === 'denied') {
+      // Update back to pending (keep denial_count)
+      db.prepare(
+        "UPDATE contacts SET status = 'pending', requested_by = ?, created_at = datetime('now'), updated_at = datetime('now') WHERE agent_a = ? AND agent_b = ?"
+      ).run(fromAgent, agent_a, agent_b);
+      return { ok: true, status: 201 };
+    }
+    if (existing.status === 'removed') {
+      // Delete and allow re-request
+      db.prepare('DELETE FROM contacts WHERE agent_a = ? AND agent_b = ?').run(agent_a, agent_b);
+    }
   }
 
   // Insert new pending contact
   db.prepare(
-    `INSERT INTO contacts (agent_a, agent_b, status, requested_by, greeting)
-     VALUES (?, ?, 'pending', ?, ?)`
-  ).run(agent_a, agent_b, fromAgent, greeting || null);
+    `INSERT INTO contacts (agent_a, agent_b, status, requested_by, denial_count)
+     VALUES (?, ?, 'pending', ?, 0)`
+  ).run(agent_a, agent_b, fromAgent);
 
   return { ok: true, status: 201 };
 }
 
 /**
+ * Send batch contact requests.
+ */
+export function requestContactBatch(
+  db: Database.Database,
+  fromAgent: string,
+  toAgents: string[],
+): BatchContactResult {
+  const results = toAgents.map(to => ({
+    to,
+    ...requestContact(db, fromAgent, to),
+  }));
+  const allOk = results.every(r => r.ok);
+  return { ok: allOk, status: allOk ? 201 : 207, results };
+}
+
+/**
  * List incoming pending contact requests for an agent.
+ * V3: Includes requesterEmail, filters expired (>30 days), no greeting.
  */
 export function listPendingRequests(
   db: Database.Database,
@@ -118,22 +237,27 @@ export function listPendingRequests(
 ): PendingRequest[] {
   // Pending requests where this agent is NOT the requester
   const rows = db.prepare(
-    `SELECT agent_a, agent_b, requested_by, greeting, created_at
-     FROM contacts
-     WHERE status = 'pending'
-       AND (agent_a = ? OR agent_b = ?)
-       AND requested_by != ?
-     ORDER BY created_at ASC`
+    `SELECT c.agent_a, c.agent_b, c.requested_by, c.created_at,
+            a.owner_email as requester_email
+     FROM contacts c
+     JOIN agents a ON a.name = c.requested_by
+     WHERE c.status = 'pending'
+       AND (c.agent_a = ? OR c.agent_b = ?)
+       AND c.requested_by != ?
+     ORDER BY c.created_at ASC`
   ).all(agent, agent, agent) as Array<{
     agent_a: string; agent_b: string; requested_by: string;
-    greeting: string | null; created_at: string;
+    created_at: string; requester_email: string | null;
   }>;
 
-  return rows.map((r) => ({
-    from: r.requested_by,
-    greeting: r.greeting,
-    createdAt: r.created_at,
-  }));
+  // Filter expired requests (>30 days old)
+  return rows
+    .filter(r => !isPendingExpired(r.created_at))
+    .map((r) => ({
+      from: r.requested_by,
+      requesterEmail: r.requester_email,
+      createdAt: r.created_at,
+    }));
 }
 
 /**
@@ -172,12 +296,24 @@ export function acceptContact(
     "UPDATE contacts SET status = 'active', updated_at = datetime('now') WHERE agent_a = ? AND agent_b = ?"
   ).run(agent_a, agent_b);
 
-  return { ok: true };
+  // Return the other agent's contact info (endpoint exchange)
+  const otherInfo = db.prepare(
+    'SELECT name, public_key, endpoint FROM agents WHERE name = ?'
+  ).get(otherAgent) as { name: string; public_key: string; endpoint: string | null } | undefined;
+
+  return {
+    ok: true,
+    contact: otherInfo ? {
+      agent: otherInfo.name,
+      endpoint: otherInfo.endpoint,
+      publicKey: otherInfo.public_key,
+    } : undefined,
+  };
 }
 
 /**
  * Deny a pending contact request.
- * The `agent` is the one denying; `otherAgent` is who sent the request.
+ * V3: Tracks denial count, auto-blocks after 3 denials.
  */
 export function denyContact(
   db: Database.Database,
@@ -187,8 +323,8 @@ export function denyContact(
   const { agent_a, agent_b } = orderPair(agent, otherAgent);
 
   const existing = db.prepare(
-    'SELECT status, requested_by FROM contacts WHERE agent_a = ? AND agent_b = ?'
-  ).get(agent_a, agent_b) as { status: string; requested_by: string } | undefined;
+    'SELECT status, requested_by, denial_count FROM contacts WHERE agent_a = ? AND agent_b = ?'
+  ).get(agent_a, agent_b) as { status: string; requested_by: string; denial_count: number } | undefined;
 
   if (!existing || existing.status !== 'pending') {
     return { ok: false, status: 404, error: 'No pending contact request found' };
@@ -199,10 +335,20 @@ export function denyContact(
     return { ok: false, status: 400, error: 'Cannot deny your own request' };
   }
 
-  // Remove the pending request entirely (allows re-request)
+  const newDenialCount = (existing.denial_count || 0) + 1;
+
+  // Update to denied status with incremented denial_count
   db.prepare(
-    'DELETE FROM contacts WHERE agent_a = ? AND agent_b = ?'
-  ).run(agent_a, agent_b);
+    "UPDATE contacts SET status = 'denied', denial_count = ?, updated_at = datetime('now') WHERE agent_a = ? AND agent_b = ?"
+  ).run(newDenialCount, agent_a, agent_b);
+
+  // Auto-block after threshold
+  if (newDenialCount >= AUTO_BLOCK_THRESHOLD) {
+    const requester = existing.requested_by;
+    db.prepare(
+      'INSERT OR IGNORE INTO blocks (blocker, blocked) VALUES (?, ?)'
+    ).run(agent, requester);
+  }
 
   return { ok: true };
 }
@@ -240,9 +386,12 @@ export function listContacts(
   db: Database.Database,
   agent: string,
 ): ContactInfo[] {
+  const now = Date.now();
+  const OFFLINE_THRESHOLD_MS = 2 * 10 * 60 * 1000; // 20 minutes
+
   const rows = db.prepare(
     `SELECT c.agent_a, c.agent_b, c.updated_at,
-            a.public_key, a.endpoint, a.name as agent_name
+            a.public_key, a.endpoint, a.name as agent_name, a.last_seen
      FROM contacts c
      JOIN agents a ON (
        (c.agent_a = ? AND a.name = c.agent_b)
@@ -254,12 +403,18 @@ export function listContacts(
   ).all(agent, agent, agent, agent) as Array<{
     agent_a: string; agent_b: string; updated_at: string;
     public_key: string; endpoint: string | null; agent_name: string;
+    last_seen: string | null;
   }>;
 
-  return rows.map((r) => ({
-    agent: r.agent_name,
-    publicKey: r.public_key,
-    endpoint: r.endpoint,
-    since: r.updated_at,
-  }));
+  return rows.map((r) => {
+    const online = r.last_seen ? (now - new Date(r.last_seen).getTime()) <= OFFLINE_THRESHOLD_MS : false;
+    return {
+      agent: r.agent_name,
+      publicKey: r.public_key,
+      endpoint: r.endpoint,
+      since: r.updated_at,
+      online,
+      lastSeen: r.last_seen,
+    };
+  });
 }
