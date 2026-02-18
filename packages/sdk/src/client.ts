@@ -34,7 +34,8 @@ import {
 import {
   loadCache,
   saveCache,
-  getCachePath,
+  getCommunityCachePath,
+  migrateOldCache,
   type CacheData,
   type CachedContact,
 } from './cache.js';
@@ -140,8 +141,8 @@ export class CC4MeNetwork extends EventEmitter {
   private relayAPI: IRelayAPI;
   private communityManager: CommunityRelayManager;
   private privateKeyObj: KeyObject;
-  private cache: CacheData | null = null;
-  private cachePath: string;
+  /** Per-community contact caches keyed by community name. */
+  private caches: Map<string, CacheData> = new Map();
   private retryQueue: RetryQueue;
   private deliverFn: DeliverFn;
   private deliveryReports: Map<string, DeliveryReport> = new Map();
@@ -168,7 +169,6 @@ export class CC4MeNetwork extends EventEmitter {
       failoverThreshold: 3,
       ...options,
     };
-    this.cachePath = getCachePath(this.options.dataDir);
 
     // Convert Buffer (PKCS8 DER) to KeyObject and validate key type
     this.privateKeyObj = createPrivateKey({
@@ -261,12 +261,18 @@ export class CC4MeNetwork extends EventEmitter {
   async start(): Promise<void> {
     if (this.started) return;
 
-    // Load local cache
-    this.cache = loadCache(this.cachePath);
+    // Migrate legacy single-file cache to per-community format
+    migrateOldCache(this.options.dataDir, this.communities[0].name);
 
-    // If no cache or cache was corrupt, try to populate from relay
-    if (!this.cache) {
-      await this.refreshContactsFromRelay();
+    // Load per-community caches; refresh from relay for any community with no cache
+    for (const community of this.communities) {
+      const cachePath = getCommunityCachePath(this.options.dataDir, community.name);
+      const cache = loadCache(cachePath);
+      if (cache) {
+        this.caches.set(community.name, cache);
+      } else {
+        await this.refreshContactsForCommunity(community.name);
+      }
     }
 
     // Send initial heartbeats to all communities
@@ -291,9 +297,12 @@ export class CC4MeNetwork extends EventEmitter {
     // Stop retry queue
     this.retryQueue.stop();
 
-    // Flush cache
-    if (this.cache) {
-      saveCache(this.cachePath, this.cache);
+    // Flush all community caches
+    for (const community of this.communities) {
+      const cache = this.caches.get(community.name);
+      if (cache) {
+        saveCache(getCommunityCachePath(this.options.dataDir, community.name), cache);
+      }
     }
 
     this.started = false;
@@ -346,11 +355,17 @@ export class CC4MeNetwork extends EventEmitter {
     if (!result.ok) {
       throw new Error(result.error || `Failed to remove contact: ${result.status}`);
     }
-    // Update cache
-    if (this.cache) {
-      this.cache.contacts = this.cache.contacts.filter((c) => c.username !== username);
-      this.cache.lastUpdated = new Date().toISOString();
-      saveCache(this.cachePath, this.cache);
+    // Update cache — remove from all community caches
+    for (const community of this.communities) {
+      const cache = this.caches.get(community.name);
+      if (cache) {
+        const before = cache.contacts.length;
+        cache.contacts = cache.contacts.filter((c) => c.username !== username);
+        if (cache.contacts.length !== before) {
+          cache.lastUpdated = new Date().toISOString();
+          saveCache(getCommunityCachePath(this.options.dataDir, community.name), cache);
+        }
+      }
     }
   }
 
@@ -366,26 +381,35 @@ export class CC4MeNetwork extends EventEmitter {
       // Relay unreachable — use cache
     }
 
-    // Fall back to cache
-    if (this.cache) {
-      return this.cache.contacts.map((c) => ({
-        username: c.username,
-        publicKey: c.publicKey,
-        endpoint: c.endpoint || '',
-        addedAt: c.addedAt,
-        online: c.online || false,
-        lastSeen: c.lastSeen || null,
-        keyUpdatedAt: null,
-        recoveryInProgress: false,
-      }));
+    // Fall back to cache — aggregate across all communities
+    const contacts: Contact[] = [];
+    const seen = new Set<string>();
+    for (const cache of this.caches.values()) {
+      for (const c of cache.contacts) {
+        if (seen.has(c.username)) continue;
+        seen.add(c.username);
+        contacts.push({
+          username: c.username,
+          publicKey: c.publicKey,
+          endpoint: c.endpoint || '',
+          addedAt: c.addedAt,
+          online: c.online || false,
+          lastSeen: c.lastSeen || null,
+          keyUpdatedAt: null,
+          recoveryInProgress: false,
+        });
+      }
     }
-
-    return [];
+    return contacts;
   }
 
-  /** Get a contact from the local cache (no relay call). */
+  /** Get a contact from the local cache (no relay call). Searches all community caches. */
   getCachedContact(username: string): CachedContact | undefined {
-    return this.cache?.contacts.find((c) => c.username === username);
+    for (const cache of this.caches.values()) {
+      const found = cache.contacts.find((c) => c.username === username);
+      if (found) return found;
+    }
+    return undefined;
   }
 
   // --- Presence ---
@@ -799,10 +823,12 @@ export class CC4MeNetwork extends EventEmitter {
         }
       }
     } catch {
-      // Fall back to cache
-      if (this.cache) {
-        for (const c of this.cache.contacts) {
-          contactsMap.set(c.username, { endpoint: c.endpoint, online: c.online || false, publicKey: c.publicKey });
+      // Fall back to cache — aggregate across all communities
+      for (const cache of this.caches.values()) {
+        for (const c of cache.contacts) {
+          if (!contactsMap.has(c.username)) {
+            contactsMap.set(c.username, { endpoint: c.endpoint, online: c.online || false, publicKey: c.publicKey });
+          }
         }
       }
     }
@@ -977,12 +1003,18 @@ export class CC4MeNetwork extends EventEmitter {
     return this.communityManager;
   }
 
-  /** Refresh contacts list from relay and update cache. */
+  /** Refresh contacts list from the first community's relay and update cache. */
   private async refreshContactsFromRelay(): Promise<void> {
+    await this.refreshContactsForCommunity(this.communities[0].name);
+  }
+
+  /** Refresh contacts for a specific community from its active relay. */
+  private async refreshContactsForCommunity(communityName: string): Promise<void> {
     try {
-      const result = await this.relayAPI.getContacts();
+      const api = this.communityManager.getActiveApi(communityName);
+      const result = await api.getContacts();
       if (result.ok && result.data) {
-        this.updateContactsCache(result.data);
+        this.updateContactsCache(result.data, communityName);
       }
     } catch {
       // Relay unreachable — keep existing cache
@@ -1030,9 +1062,10 @@ export class CC4MeNetwork extends EventEmitter {
     if (report) report.finalStatus = status;
   }
 
-  /** Update the local contacts cache. */
-  private updateContactsCache(contacts: RelayContact[]): void {
-    this.cache = {
+  /** Update the local contacts cache for a specific community. */
+  private updateContactsCache(contacts: RelayContact[], communityName?: string): void {
+    const name = communityName || this.communities[0].name;
+    const cache: CacheData = {
       contacts: contacts.map((c) => ({
         username: c.agent,
         publicKey: c.publicKey,
@@ -1040,10 +1073,12 @@ export class CC4MeNetwork extends EventEmitter {
         addedAt: c.since,
         online: c.online,
         lastSeen: c.lastSeen,
+        community: name,
       })),
       lastUpdated: new Date().toISOString(),
     };
-    saveCache(this.cachePath, this.cache);
+    this.caches.set(name, cache);
+    saveCache(getCommunityCachePath(this.options.dataDir, name), cache);
   }
 }
 
