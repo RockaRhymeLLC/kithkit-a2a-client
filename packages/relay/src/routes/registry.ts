@@ -214,3 +214,159 @@ export function lookupAgent(db: Database.Database, name: string): {
     status: row.status,
   };
 }
+
+/** Recovery cooling-off period: 1 hour. */
+const RECOVERY_COOLOFF_MS = 60 * 60 * 1000;
+
+export interface RotateKeyResult {
+  ok: boolean;
+  status?: number;
+  error?: string;
+}
+
+/**
+ * Rotate an agent's public key.
+ *
+ * Two modes:
+ * 1. Normal rotation: callerAgent matches targetName (authenticated with current key).
+ *    Updates key immediately.
+ * 2. Recovery activation: No auth needed, but pending recovery must exist and
+ *    cooling-off period must have elapsed. The newPublicKey must match pending_public_key.
+ *
+ * @param callerAgent - Authenticated agent name (null if unauthenticated/recovery mode)
+ * @param now - Current time in ms (injectable for testing)
+ */
+export function rotateKey(
+  db: Database.Database,
+  targetName: string,
+  newPublicKey: string,
+  callerAgent: string | null,
+  now: number = Date.now(),
+): RotateKeyResult {
+  if (!newPublicKey) {
+    return { ok: false, status: 400, error: 'newPublicKey is required' };
+  }
+
+  const agent = db.prepare(
+    'SELECT name, public_key, status, recovery_initiated_at, pending_public_key FROM agents WHERE name = ?'
+  ).get(targetName) as {
+    name: string; public_key: string; status: string;
+    recovery_initiated_at: string | null; pending_public_key: string | null;
+  } | undefined;
+
+  if (!agent) {
+    return { ok: false, status: 404, error: 'Agent not found' };
+  }
+
+  if (agent.status !== 'active') {
+    return { ok: false, status: 403, error: 'Agent is not active' };
+  }
+
+  // Check if recovery is in progress
+  if (agent.recovery_initiated_at) {
+    const elapsed = now - new Date(agent.recovery_initiated_at).getTime();
+
+    if (elapsed < RECOVERY_COOLOFF_MS) {
+      return { ok: false, status: 403, error: 'Recovery cooling-off period not elapsed' };
+    }
+
+    // Cooling-off elapsed — activate the pending key
+    if (newPublicKey !== agent.pending_public_key) {
+      return { ok: false, status: 400, error: 'newPublicKey must match the pending recovery key' };
+    }
+
+    // Check uniqueness
+    const pubkeyExists = db.prepare(
+      'SELECT name FROM agents WHERE public_key = ? AND name != ?'
+    ).get(newPublicKey, targetName);
+    if (pubkeyExists) {
+      return { ok: false, status: 409, error: 'An agent with this public key already exists' };
+    }
+
+    db.prepare(
+      `UPDATE agents SET public_key = ?, key_updated_at = datetime('now'),
+       recovery_initiated_at = NULL, pending_public_key = NULL WHERE name = ?`
+    ).run(newPublicKey, targetName);
+
+    return { ok: true };
+  }
+
+  // Normal rotation — caller must be the agent themselves
+  if (callerAgent !== targetName) {
+    return { ok: false, status: 403, error: 'Can only rotate your own key' };
+  }
+
+  // Check uniqueness
+  const pubkeyExists = db.prepare(
+    'SELECT name FROM agents WHERE public_key = ? AND name != ?'
+  ).get(newPublicKey, targetName);
+  if (pubkeyExists) {
+    return { ok: false, status: 409, error: 'An agent with this public key already exists' };
+  }
+
+  db.prepare(
+    `UPDATE agents SET public_key = ?, key_updated_at = datetime('now') WHERE name = ?`
+  ).run(newPublicKey, targetName);
+
+  return { ok: true };
+}
+
+/**
+ * Initiate key recovery via email verification.
+ * Sets a pending key with a 1-hour cooling-off period.
+ * Unauthenticated — the agent has lost their key.
+ */
+export function recoverKey(
+  db: Database.Database,
+  targetName: string,
+  ownerEmail: string,
+  newPublicKey: string,
+): RotateKeyResult {
+  if (!ownerEmail) {
+    return { ok: false, status: 400, error: 'ownerEmail is required' };
+  }
+  if (!newPublicKey) {
+    return { ok: false, status: 400, error: 'newPublicKey is required' };
+  }
+
+  const agent = db.prepare(
+    'SELECT name, owner_email, status FROM agents WHERE name = ?'
+  ).get(targetName) as { name: string; owner_email: string; status: string } | undefined;
+
+  if (!agent) {
+    return { ok: false, status: 404, error: 'Agent not found' };
+  }
+
+  if (agent.status !== 'active') {
+    return { ok: false, status: 403, error: 'Agent is not active' };
+  }
+
+  // Verify email matches
+  if (agent.owner_email !== ownerEmail) {
+    return { ok: false, status: 403, error: 'Email does not match registered email' };
+  }
+
+  // Verify email is verified
+  const verification = db.prepare(
+    'SELECT verified FROM email_verifications WHERE agent_name = ? AND email = ?'
+  ).get(targetName, ownerEmail) as { verified: number } | undefined;
+
+  if (!verification || !verification.verified) {
+    return { ok: false, status: 400, error: 'Email not verified — complete /verify/send and /verify/confirm first' };
+  }
+
+  // Check uniqueness of new key
+  const pubkeyExists = db.prepare(
+    'SELECT name FROM agents WHERE public_key = ? AND name != ?'
+  ).get(newPublicKey, targetName);
+  if (pubkeyExists) {
+    return { ok: false, status: 409, error: 'An agent with this public key already exists' };
+  }
+
+  // Set pending recovery
+  db.prepare(
+    `UPDATE agents SET pending_public_key = ?, recovery_initiated_at = datetime('now') WHERE name = ?`
+  ).run(newPublicKey, targetName);
+
+  return { ok: true, status: 202 };
+}

@@ -15,7 +15,7 @@ let _dbPath: string | null = null;
 /**
  * Current schema version. Increment when schema changes.
  */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 /**
  * Full v2 schema DDL.
@@ -197,6 +197,19 @@ export function initializeDatabase(dbPath: string): Database.Database {
     db.exec('ALTER TABLE contacts ADD COLUMN denial_count INTEGER DEFAULT 0');
   } catch {
     // Column already exists — ignore
+  }
+
+  // V5: Add key rotation columns to agents (ALTER TABLE, idempotent)
+  for (const col of [
+    'key_updated_at TEXT',
+    'recovery_initiated_at TEXT',
+    'pending_public_key TEXT',
+  ]) {
+    try {
+      db.exec(`ALTER TABLE agents ADD COLUMN ${col}`);
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   // Track schema version

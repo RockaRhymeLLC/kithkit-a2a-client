@@ -16,6 +16,8 @@ import {
   lookupAgent,
   approveAgent,
   revokeAgent,
+  rotateKey,
+  recoverKey,
 } from './routes/registry.js';
 import {
   requestContact,
@@ -215,6 +217,33 @@ const server = createServer(async (req, res) => {
       if (!a.ok) return json(res, a.status || 401, { error: a.error });
       const result = revokeAgent(db, params.name, a.agent!);
       return json(res, result.status || (result.ok ? 200 : 400), result);
+    }
+
+    // POST /registry/agents/:name/rotate-key — rotate key (authenticated or recovery)
+    params = matchPath('/registry/agents/:name/rotate-key', path);
+    if (params && method === 'POST') {
+      const data = parseBody();
+      if (!data) return json(res, 400, { error: 'Invalid JSON' });
+
+      // Try standard auth first (normal rotation)
+      let callerAgent: string | null = null;
+      const a = auth();
+      if (a.ok) {
+        callerAgent = a.agent!;
+      }
+      // If auth fails but there's a pending recovery, allow unauthenticated (recovery mode)
+
+      const result = rotateKey(db, params.name, data.newPublicKey, callerAgent);
+      return json(res, result.status || (result.ok ? 200 : 400), result);
+    }
+
+    // POST /registry/agents/:name/recover — initiate key recovery (unauthenticated)
+    params = matchPath('/registry/agents/:name/recover', path);
+    if (params && method === 'POST') {
+      const data = parseBody();
+      if (!data) return json(res, 400, { error: 'Invalid JSON' });
+      const result = recoverKey(db, params.name, data.ownerEmail, data.newPublicKey);
+      return json(res, result.status || (result.ok ? 202 : 400), result);
     }
 
     // ==========================================================

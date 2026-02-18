@@ -48,6 +48,8 @@ export interface ContactInfo {
   since: string;
   online: boolean;
   lastSeen: string | null;
+  keyUpdatedAt: string | null;
+  recoveryInProgress: boolean;
 }
 
 export interface PendingRequest {
@@ -379,19 +381,23 @@ export function removeContact(
   return { ok: true };
 }
 
+/** Recovery cooling-off period: 1 hour. */
+const RECOVERY_COOLOFF_MS = 60 * 60 * 1000;
+
 /**
  * List active contacts for an agent, with their public keys and endpoints.
  */
 export function listContacts(
   db: Database.Database,
   agent: string,
+  now: number = Date.now(),
 ): ContactInfo[] {
-  const now = Date.now();
   const OFFLINE_THRESHOLD_MS = 2 * 10 * 60 * 1000; // 20 minutes
 
   const rows = db.prepare(
     `SELECT c.agent_a, c.agent_b, c.updated_at,
-            a.public_key, a.endpoint, a.name as agent_name, a.last_seen
+            a.public_key, a.endpoint, a.name as agent_name, a.last_seen,
+            a.key_updated_at, a.recovery_initiated_at
      FROM contacts c
      JOIN agents a ON (
        (c.agent_a = ? AND a.name = c.agent_b)
@@ -403,11 +409,15 @@ export function listContacts(
   ).all(agent, agent, agent, agent) as Array<{
     agent_a: string; agent_b: string; updated_at: string;
     public_key: string; endpoint: string | null; agent_name: string;
-    last_seen: string | null;
+    last_seen: string | null; key_updated_at: string | null;
+    recovery_initiated_at: string | null;
   }>;
 
   return rows.map((r) => {
     const online = r.last_seen ? (now - new Date(r.last_seen).getTime()) <= OFFLINE_THRESHOLD_MS : false;
+    const recoveryInProgress = r.recovery_initiated_at
+      ? (now - new Date(r.recovery_initiated_at).getTime()) < RECOVERY_COOLOFF_MS
+      : false;
     return {
       agent: r.agent_name,
       publicKey: r.public_key,
@@ -415,6 +425,8 @@ export function listContacts(
       since: r.updated_at,
       online,
       lastSeen: r.last_seen,
+      keyUpdatedAt: r.key_updated_at,
+      recoveryInProgress,
     };
   });
 }
