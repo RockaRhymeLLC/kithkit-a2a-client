@@ -9,6 +9,7 @@ import { createPrivateKey, generateKeyPairSync, randomUUID, sign as cryptoSign, 
 import type {
   CC4MeNetworkOptions,
   CommunityConfig,
+  CommunityStatusEvent,
   SendResult,
   GroupSendResult,
   GroupMessage,
@@ -71,6 +72,7 @@ export interface CC4MeNetworkEvents {
   'group-invitation': [invitation: GroupInvitationEvent];
   'group-member-change': [change: GroupMemberChangeEvent];
   'group-message': [msg: GroupMessage];
+  'community:status': [event: CommunityStatusEvent];
 }
 
 export interface CC4MeNetworkInternalOptions extends CC4MeNetworkOptions {
@@ -196,6 +198,11 @@ export class CC4MeNetwork extends EventEmitter {
 
     // relayAPI points to the first community's active API (backward compat for existing methods)
     this.relayAPI = this.communityManager.getActiveApi(this.communities[0].name);
+
+    // Forward community status events (failover, offline)
+    this.communityManager.on('community:status', (event: CommunityStatusEvent) => {
+      this.emit('community:status', event);
+    });
 
     // Delivery function: injectable for testing, defaults to HTTP POST
     this.deliverFn = options.deliverFn || httpDeliver;

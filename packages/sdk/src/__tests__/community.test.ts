@@ -362,6 +362,314 @@ describe('t-102: Per-community independent heartbeat', () => {
   });
 });
 
+// ─── t-103: Failover detection and sticky switch ─────────────────────────────
+
+/** Create a mock relay API whose responses are controlled step-by-step. */
+function createControllableMockRelayAPI(): { api: IRelayAPI; setNextResponse: (resp: RelayResponse) => void } {
+  let nextResponse: RelayResponse = { ok: true, status: 200 };
+  const base = createMockRelayAPI();
+  const api: IRelayAPI = {
+    ...base,
+    getContacts: async () => nextResponse as RelayResponse<RelayContact[]>,
+    heartbeat: async () => nextResponse,
+  };
+  return { api, setNextResponse: (resp: RelayResponse) => { nextResponse = resp; } };
+}
+
+describe('t-103: Failover detection and sticky switch', () => {
+  const kp = genKeypair();
+
+  const communities: CommunityConfig[] = [
+    { name: 'home', primary: 'https://relay.bmobot.ai', failover: 'https://backup.bmobot.ai' },
+    { name: 'company', primary: 'https://relay.acme.com' },
+  ];
+
+  // Steps 1-2: Below threshold, reset on success
+  it('steps 1-2: failures below threshold stay on primary, success resets counter', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    // First success to exit startup grace period
+    await manager.callApi('home', api => api.getContacts());
+    assert.equal(manager.getFailureCount('home'), 0);
+
+    // Step 1: 2 consecutive 500 errors — below threshold (3)
+    homePrimary.setNextResponse({ ok: false, status: 500, error: 'Server Error' });
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+    assert.equal(manager.getFailureCount('home'), 2);
+    assert.equal(manager.getActiveRelayType('home'), 'primary'); // Still on primary
+
+    // Step 2: 1 successful call resets counter
+    homePrimary.setNextResponse({ ok: true, status: 200 });
+    await manager.callApi('home', api => api.getContacts());
+    assert.equal(manager.getFailureCount('home'), 0);
+  });
+
+  // Step 3: 3 consecutive failures trigger failover + event
+  it('step 3: 3 failures trigger failover with event', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    // First success to exit startup grace
+    await manager.callApi('home', api => api.getContacts());
+
+    // Track events
+    const events: Array<{ community: string; status: string }> = [];
+    manager.on('community:status', (e) => events.push(e));
+
+    // 3 consecutive 500 errors
+    homePrimary.setNextResponse({ ok: false, status: 500, error: 'Server Error' });
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+
+    // Should have switched to failover
+    assert.equal(manager.getActiveRelayType('home'), 'failover');
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.community, 'home');
+    assert.equal(events[0]!.status, 'failover');
+  });
+
+  // Step 4: After failover, calls go to failover relay (sticky)
+  it('step 4: post-failover calls route to failover relay', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    // Exit grace + trigger failover
+    await manager.callApi('home', api => api.getContacts());
+    homePrimary.setNextResponse({ ok: false, status: 500, error: 'Server Error' });
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+    assert.equal(manager.getActiveRelayType('home'), 'failover');
+
+    // Now call goes to failover
+    const activeApi = manager.getActiveApi('home');
+    assert.equal(activeApi, homeFailover.api);
+
+    // Success on failover resets failover's counter
+    homeFailover.setNextResponse({ ok: true, status: 200 });
+    await manager.callApi('home', api => api.getContacts());
+    assert.equal(manager.getFailureCount('home'), 0);
+    assert.equal(manager.getActiveRelayType('home'), 'failover'); // Still on failover
+  });
+
+  // Step 5: Primary healthy again — no auto-failback (sticky)
+  it('step 5: no auto-failback when primary recovers', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    // Trigger failover
+    await manager.callApi('home', api => api.getContacts());
+    homePrimary.setNextResponse({ ok: false, status: 500, error: 'down' });
+    for (let i = 0; i < 3; i++) await manager.callApi('home', api => api.getContacts());
+    assert.equal(manager.getActiveRelayType('home'), 'failover');
+
+    // Primary is "healthy" now — but we won't check it
+    homePrimary.setNextResponse({ ok: true, status: 200 });
+
+    // Calls still go to failover (sticky)
+    homeFailover.setNextResponse({ ok: true, status: 200 });
+    await manager.callApi('home', api => api.getContacts());
+    assert.equal(manager.getActiveRelayType('home'), 'failover');
+  });
+
+  // Step 6: 404 (client error) does not increment counter
+  it('step 6: 4xx errors do not increment failure counter', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    await manager.callApi('home', api => api.getContacts());
+    homePrimary.setNextResponse({ ok: false, status: 404, error: 'Not Found' });
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+
+    // Counter should be 0 — 404 doesn't count
+    assert.equal(manager.getFailureCount('home'), 0);
+    assert.equal(manager.getActiveRelayType('home'), 'primary');
+  });
+
+  // Step 7: Network error (thrown) increments counter
+  it('step 7: network errors (thrown) increment failure counter', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    // Exit grace
+    await manager.callApi('home', api => api.getContacts());
+
+    // Override to throw network error
+    (homePrimary.api as any).getContacts = async () => { throw new Error('ECONNREFUSED'); };
+
+    try { await manager.callApi('home', api => api.getContacts()); } catch { /* expected */ }
+    assert.equal(manager.getFailureCount('home'), 1);
+
+    try { await manager.callApi('home', api => api.getContacts()); } catch { /* expected */ }
+    assert.equal(manager.getFailureCount('home'), 2);
+  });
+
+  // Step 8: Startup grace — failures before first success don't count
+  it('step 8: startup grace period — failures before first success ignored', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    const events: Array<{ community: string; status: string }> = [];
+    manager.on('community:status', (e) => events.push(e));
+
+    // 3 failures before any success — should NOT trigger failover
+    homePrimary.setNextResponse({ ok: false, status: 500, error: 'down' });
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+
+    assert.equal(manager.getFailureCount('home'), 0); // Not counting during grace
+    assert.equal(manager.getActiveRelayType('home'), 'primary'); // Still on primary
+    assert.equal(events.length, 0); // No failover event
+  });
+});
+
+// ─── t-104: Community fully offline (both relays down) ───────────────────────
+
+describe('t-104: Community fully offline (both relays down)', () => {
+  const kp = genKeypair();
+
+  const communities: CommunityConfig[] = [
+    { name: 'home', primary: 'https://relay.bmobot.ai', failover: 'https://backup.bmobot.ai' },
+    { name: 'company', primary: 'https://relay.acme.com' },
+  ];
+
+  // Steps 1-2: Primary fails → failover, failover fails → offline
+  it('steps 1-2: primary fail → failover event, failover fail → offline event', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    const events: Array<{ community: string; status: string }> = [];
+    manager.on('community:status', (e) => events.push(e));
+
+    // Exit grace
+    await manager.callApi('home', api => api.getContacts());
+
+    // Step 1: Primary fails 3 times → failover
+    homePrimary.setNextResponse({ ok: false, status: 500, error: 'down' });
+    for (let i = 0; i < 3; i++) await manager.callApi('home', api => api.getContacts());
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], { community: 'home', status: 'failover' });
+
+    // Step 2: Failover fails 3 times → offline
+    homeFailover.setNextResponse({ ok: false, status: 500, error: 'also down' });
+    // Failover starts with firstSuccessSeen=true (no grace), so failures count immediately
+    for (let i = 0; i < 3; i++) await manager.callApi('home', api => api.getContacts());
+    assert.equal(events.length, 2);
+    assert.deepEqual(events[1], { community: 'home', status: 'offline' });
+  });
+
+  // Step 3: Company community unaffected
+  it('step 3: other communities unaffected by one community failing', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    // Exit grace on both
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('company', api => api.getContacts());
+
+    // Fail home
+    homePrimary.setNextResponse({ ok: false, status: 500, error: 'down' });
+    for (let i = 0; i < 3; i++) await manager.callApi('home', api => api.getContacts());
+    assert.equal(manager.getActiveRelayType('home'), 'failover');
+
+    // Company still fine
+    companyPrimary.setNextResponse({ ok: true, status: 200 });
+    const result = await manager.callApi('company', api => api.getContacts());
+    assert.equal(result.ok, true);
+    assert.equal(manager.getActiveRelayType('company'), 'primary');
+    assert.equal(manager.getFailureCount('company'), 0);
+  });
+
+  // Steps 4-5: Cached contacts still available while offline (tests at CC4MeNetwork level)
+  // These require the full CC4MeNetwork client — tested via t-105 and existing client tests
+
+  // Step 6: No failover configured → goes directly to offline
+  it('step 6: no failover configured → offline directly', async () => {
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      [{ name: 'company', primary: 'https://relay.acme.com' }],
+      'test-agent', kp.privateKey, 3,
+      { 'company:primary': companyPrimary.api },
+    );
+
+    const events: Array<{ community: string; status: string }> = [];
+    manager.on('community:status', (e) => events.push(e));
+
+    // Exit grace
+    await manager.callApi('company', api => api.getContacts());
+
+    // 3 failures on primary with no failover → offline
+    companyPrimary.setNextResponse({ ok: false, status: 500, error: 'down' });
+    for (let i = 0; i < 3; i++) await manager.callApi('company', api => api.getContacts());
+
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0], { community: 'company', status: 'offline' });
+    // Still "active" on primary (no failover to switch to) — but offline
+    assert.equal(manager.getActiveRelayType('company'), 'primary');
+  });
+});
+
 // ─── t-105: Per-community contact cache files and migration ──────────────────
 
 /** Create a mock relay API that returns specific contacts. */

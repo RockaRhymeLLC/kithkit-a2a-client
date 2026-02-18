@@ -12,9 +12,10 @@
  * - Thrown error: increments counter (after first success)
  */
 
+import { EventEmitter } from 'node:events';
 import { createPrivateKey, type KeyObject } from 'node:crypto';
 import { HttpRelayAPI, type IRelayAPI, type RelayResponse } from './relay-api.js';
-import type { CommunityConfig } from './types.js';
+import type { CommunityConfig, CommunityStatusEvent } from './types.js';
 
 export interface CommunityState {
   name: string;
@@ -27,7 +28,7 @@ export interface CommunityState {
   heartbeatTimer: ReturnType<typeof setInterval> | null;
 }
 
-export class CommunityRelayManager {
+export class CommunityRelayManager extends EventEmitter {
   private communities: Map<string, CommunityState> = new Map();
   private communityOrder: string[];
   private hostnameMap: Map<string, string> = new Map();
@@ -40,6 +41,7 @@ export class CommunityRelayManager {
     failoverThreshold: number,
     relayAPIs?: Record<string, IRelayAPI>,
   ) {
+    super();
     this.failoverThreshold = failoverThreshold;
     this.communityOrder = communities.map(c => c.name);
 
@@ -107,13 +109,17 @@ export class CommunityRelayManager {
   }
 
   /**
-   * Call a relay API function with failure tracking.
+   * Call a relay API function with failure tracking and automatic failover.
    *
    * Wraps the callback, inspects the result, and updates the failure counter:
    * - ok: true → reset counter, mark first success
    * - status 0 or >= 500 → increment counter (network/server error)
    * - status 4xx → no change (client error, not a relay health issue)
    * - thrown error → increment counter
+   *
+   * When failures reach the threshold:
+   * - If failover relay exists and active is primary → switch to failover
+   * - Otherwise → emit community:offline
    *
    * Startup transient grace: counter doesn't increment until first successful call.
    */
@@ -135,6 +141,7 @@ export class CommunityRelayManager {
       } else if (result.status === 0 || result.status >= 500) {
         if (state.firstSuccessSeen) {
           state.consecutiveFailures++;
+          this.checkFailover(state);
         }
       }
       // 4xx: no counter change
@@ -142,8 +149,32 @@ export class CommunityRelayManager {
     } catch (err) {
       if (state.firstSuccessSeen) {
         state.consecutiveFailures++;
+        this.checkFailover(state);
       }
       throw err;
+    }
+  }
+
+  /**
+   * Check if failure threshold is reached and trigger failover or offline.
+   *
+   * Called after incrementing consecutiveFailures. State machine:
+   * - primary + failures >= threshold + failover exists → switch to failover
+   * - primary + failures >= threshold + no failover → offline
+   * - failover + failures >= threshold → offline
+   */
+  private checkFailover(state: CommunityState): void {
+    if (state.consecutiveFailures < this.failoverThreshold) return;
+
+    if (state.activeRelay === 'primary' && state.failoverApi) {
+      // Switch to failover
+      state.activeRelay = 'failover';
+      state.consecutiveFailures = 0;
+      state.firstSuccessSeen = true; // No grace period for failover
+      this.emit('community:status', { community: state.name, status: 'failover' } satisfies CommunityStatusEvent);
+    } else {
+      // Both down (or no failover configured)
+      this.emit('community:status', { community: state.name, status: 'offline' } satisfies CommunityStatusEvent);
     }
   }
 
