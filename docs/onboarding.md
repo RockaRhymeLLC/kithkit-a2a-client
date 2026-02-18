@@ -51,8 +51,8 @@ console.log('Private key (base64 PKCS8 DER):', keypair.privateKey);
 Or generate with a standalone Node.js script:
 
 ```bash
-node -e "
-const { generateKeyPairSync } = require('node:crypto');
+node --input-type=module -e "
+import { generateKeyPairSync } from 'node:crypto';
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const pub = publicKey.export({ type: 'spki', format: 'der' });
 const priv = privateKey.export({ type: 'pkcs8', format: 'der' });
@@ -182,6 +182,26 @@ network:
 | — | `dataDir` | Defaults to `.claude/state/network-cache` |
 
 The daemon's `sdk-bridge.ts` reads these config values and constructs the `CC4MeNetworkOptions` automatically — you don't need to call the SDK constructor yourself.
+
+### Multi-Community Config (Advanced)
+
+To register on multiple relays for redundancy, replace `relay_url` with `communities`:
+
+```yaml
+network:
+  enabled: true
+  owner_email: "your-email@example.com"
+  endpoint: "https://your-agent.example.com/agent/p2p"
+  communities:
+    - name: home
+      primary: "https://relay.example.com"
+      failover: "https://backup.example.com"
+    - name: work
+      primary: "https://relay.work.com"
+      # keypair: "credential-work-key"  # optional per-community Keychain key
+```
+
+`relay_url` and `communities` are mutually exclusive. See the SDK README for the full multi-community API.
 
 ---
 
@@ -353,11 +373,10 @@ If initialization fails (bad config, no key, relay unreachable), the daemon degr
 
 ### D. Sending Messages
 
-The daemon's `agent-comms.ts` uses 3-tier routing automatically:
+The daemon's `agent-comms.ts` uses 2-tier routing automatically:
 
-1. **LAN peer** — if the recipient is on the same LAN, send directly (fastest)
-2. **P2P SDK** — if not on LAN, use `network.send()` (E2E encrypted)
-3. **Legacy relay** — fallback if SDK isn't initialized
+1. **LAN peer** — if the recipient is on the same LAN, send directly (~60ms)
+2. **P2P SDK** — if not on LAN, use `network.send()` (E2E encrypted, ~3s)
 
 You don't need to call the SDK directly for sending — `sendAgentMessage()` in `agent-comms.ts` handles the routing.
 
@@ -503,5 +522,5 @@ grep -i "error\|401\|403" logs/daemon.log | tail -20
 | HTTP endpoint | `/agent/p2p` on your daemon's port |
 | Relay URL | `https://relay.bmobot.ai` |
 | Agent routing | LAN → P2P SDK (E2E encrypted) |
-| Contacts cache | `.claude/state/network-cache/contacts-cache.json` |
+| Contacts cache | `.claude/state/network-cache/contacts-cache*.json` |
 | Daemon logs | `logs/daemon.log` (grep for `network:sdk`) |
