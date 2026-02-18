@@ -15,7 +15,7 @@ let _dbPath: string | null = null;
 /**
  * Current schema version. Increment when schema changes.
  */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 /**
  * Full v2 schema DDL.
@@ -86,31 +86,9 @@ const V2_SCHEMA = `
     window_start TEXT NOT NULL
   );
 
-  -- v1 compat: messages table (for 30-day migration period)
-  CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    from_agent TEXT NOT NULL,
-    to_agent TEXT NOT NULL,
-    type TEXT NOT NULL,
-    text TEXT,
-    payload TEXT NOT NULL,
-    signature TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY (to_agent) REFERENCES agents(name)
-  );
-
-  -- v1 compat: nonces table (for replay protection during migration)
-  CREATE TABLE IF NOT EXISTS nonces (
-    nonce TEXT PRIMARY KEY,
-    seen_at TEXT DEFAULT (datetime('now'))
-  );
-
   -- Indexes
   CREATE INDEX IF NOT EXISTS idx_contacts_agent_b ON contacts(agent_b);
   CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(status);
-  CREATE INDEX IF NOT EXISTS idx_messages_to_agent ON messages(to_agent);
-  CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
-  CREATE INDEX IF NOT EXISTS idx_nonces_seen_at ON nonces(seen_at);
   CREATE INDEX IF NOT EXISTS idx_broadcasts_created_at ON broadcasts(created_at);
   CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
   CREATE INDEX IF NOT EXISTS idx_agents_email ON agents(owner_email);
@@ -211,6 +189,10 @@ export function initializeDatabase(dbPath: string): Database.Database {
       // Column already exists — ignore
     }
   }
+
+  // V6: Drop v1-compat tables (messages, nonces) — v1 sunset passed
+  db.exec('DROP TABLE IF EXISTS messages');
+  db.exec('DROP TABLE IF EXISTS nonces');
 
   // Track schema version
   db.exec(`

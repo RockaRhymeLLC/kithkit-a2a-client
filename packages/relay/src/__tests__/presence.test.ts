@@ -1,7 +1,7 @@
 /**
  * Tests for presence system (t-061).
  *
- * t-061: Presence heartbeat + v3 changes (getPresence/batchPresence → 410)
+ * t-061: Presence heartbeat (v3: getPresence/batchPresence removed, 410 at route level)
  */
 
 import { describe, it, afterEach } from 'node:test';
@@ -11,11 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { initializeDatabase } from '../db.js';
-import {
-  updatePresence,
-  getPresence,
-  batchPresence,
-} from '../routes/presence.js';
+import { updatePresence } from '../routes/presence.js';
 
 function setupDb() {
   const dir = mkdtempSync(join(tmpdir(), 'relay-presence-test-'));
@@ -89,23 +85,7 @@ describe('t-061: Presence heartbeat, offline detection, batch query', () => {
     db.close();
   });
 
-  // Step 3: getPresence returns 410 in v3
-  it('step 3: getPresence returns 410 Gone', () => {
-    const db = withDb();
-    const result = getPresence(db, 'alpha');
-    assert.equal((result as any).status, 410);
-    db.close();
-  });
-
-  // Step 4: batchPresence returns 410 in v3
-  it('step 4: batchPresence returns 410 Gone', () => {
-    const db = withDb();
-    const result = batchPresence(db, ['alpha', 'beta']);
-    assert.equal((result as any).status, 410);
-    db.close();
-  });
-
-  // Step 5: Heartbeat verifies last_seen directly in DB
+  // Step 3: Heartbeat verifies last_seen directly in DB
   it('step 5: multiple heartbeats update last_seen correctly', () => {
     const db = withDb();
     const alpha = genKeypair();
@@ -166,24 +146,4 @@ describe('Presence: edge cases', () => {
     db.close();
   });
 
-  it('getPresence returns 410 for any agent', () => {
-    const db = withDb();
-    const result = getPresence(db, 'any-agent');
-    assert.equal((result as any).status, 410);
-    db.close();
-  });
-
-  it('batchPresence returns 410 for any list', () => {
-    const db = withDb();
-    const result = batchPresence(db, ['a', 'b']);
-    assert.equal((result as any).status, 410);
-    db.close();
-  });
-
-  it('batchPresence returns 410 for empty list', () => {
-    const db = withDb();
-    const result = batchPresence(db, []);
-    assert.equal((result as any).status, 410);
-    db.close();
-  });
 });

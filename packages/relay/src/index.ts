@@ -30,8 +30,6 @@ import {
 } from './routes/contacts.js';
 import {
   updatePresence,
-  getPresence,
-  batchPresence,
 } from './routes/presence.js';
 import {
   listPendingRegistrations,
@@ -54,7 +52,6 @@ import {
   getChanges,
   transferOwnership,
 } from './routes/groups.js';
-import { v1Send, v1Inbox, v1Ack, isSunset } from './routes/v1-compat.js';
 import { handleVerifySend, handleVerifyConfirm } from './routes/verify.js';
 import { sesSender } from './ses-sender.js';
 import type { EmailSender } from './email.js';
@@ -64,9 +61,6 @@ const emailSender: EmailSender = sesSender;
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const DB_PATH = process.env.DB_PATH || './data/relay.db';
-
-// v1 compat sunset: fixed date (not relative to server start)
-const V1_SUNSET = new Date('2026-03-19T00:00:00Z');
 
 /** Read full request body as string. */
 function readBody(req: IncomingMessage): Promise<string> {
@@ -493,48 +487,6 @@ const server = createServer(async (req, res) => {
       if (!a.ok) return json(res, a.status || 401, { error: a.error });
       const result = getGroupDetails(db, params.groupId, a.agent!);
       return json(res, typeof result.status === 'number' ? result.status : 200, result);
-    }
-
-    // ==========================================================
-    // V1 COMPAT ROUTES (deprecated, 30-day sunset)
-    // ==========================================================
-
-    if (path === '/relay/send' && method === 'POST') {
-      if (isSunset(V1_SUNSET)) return json(res, 410, { error: 'v1 API sunset — use v2' });
-      const a = auth();
-      if (!a.ok) return json(res, a.status || 401, { error: a.error });
-      const data = parseBody();
-      if (!data) return json(res, 400, { error: 'Invalid JSON' });
-      const result = v1Send(db, data, a.agent!, V1_SUNSET);
-      res.setHeader('Deprecation', 'true');
-      res.setHeader('Sunset', V1_SUNSET.toUTCString());
-      return json(res, result.status || (result.ok ? 200 : 400), result);
-    }
-
-    params = matchPath('/relay/inbox/:agent', path);
-    if (params && method === 'GET') {
-      if (isSunset(V1_SUNSET)) return json(res, 410, { error: 'v1 API sunset — use v2' });
-      const a = auth();
-      if (!a.ok) return json(res, a.status || 401, { error: a.error });
-      if (a.agent !== params.agent) return json(res, 403, { error: 'Forbidden' });
-      const result = v1Inbox(db, params.agent, V1_SUNSET);
-      res.setHeader('Deprecation', 'true');
-      res.setHeader('Sunset', V1_SUNSET.toUTCString());
-      return json(res, result.status || (result.ok ? 200 : 400), result);
-    }
-
-    params = matchPath('/relay/inbox/:agent/ack', path);
-    if (params && method === 'POST') {
-      if (isSunset(V1_SUNSET)) return json(res, 410, { error: 'v1 API sunset — use v2' });
-      const a = auth();
-      if (!a.ok) return json(res, a.status || 401, { error: a.error });
-      if (a.agent !== params.agent) return json(res, 403, { error: 'Forbidden' });
-      const data = parseBody();
-      if (!data) return json(res, 400, { error: 'Invalid JSON' });
-      const result = v1Ack(db, params.agent, data.messageIds || [], V1_SUNSET);
-      res.setHeader('Deprecation', 'true');
-      res.setHeader('Sunset', V1_SUNSET.toUTCString());
-      return json(res, result.status || (result.ok ? 200 : 400), result);
     }
 
     // ==========================================================

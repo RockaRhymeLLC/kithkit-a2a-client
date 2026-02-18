@@ -56,7 +56,7 @@ describe('t-054: Relay schema migration (v1 → v2 tables)', () => {
     assert.ok(tableNames.includes('rate_limits'), 'rate_limits table exists');
 
     // Schema version should be 4 (v2 base + v3 groups + v4 contacts)
-    assert.equal(getSchemaVersion(db), 5);
+    assert.equal(getSchemaVersion(db), 6);
   });
 
   // Step 2: Verify agents table columns
@@ -361,7 +361,7 @@ describe('t-080: Schema v3 migration creates groups tables', () => {
   // Step 6: schema_version = 4
   it('step 6: schema_version is 4', () => {
     const db = withDb();
-    assert.equal(getSchemaVersion(db), 5);
+    assert.equal(getSchemaVersion(db), 6);
   });
 
   // Step 7: Phase 1 tables intact
@@ -441,7 +441,7 @@ describe('t-080: Schema v3 migration creates groups tables', () => {
     assert.equal(group.name, 'Test');
     const membership = db2.prepare('SELECT * FROM group_memberships WHERE group_id = ?').get('g1') as any;
     assert.equal(membership.role, 'owner');
-    assert.equal(getSchemaVersion(db2), 5);
+    assert.equal(getSchemaVersion(db2), 6);
     db2.close();
   });
 });

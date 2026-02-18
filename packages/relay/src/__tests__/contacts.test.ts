@@ -22,11 +22,7 @@ import {
   removeContact,
   listContacts,
 } from '../routes/contacts.js';
-import {
-  updatePresence,
-  getPresence,
-  batchPresence,
-} from '../routes/presence.js';
+import { updatePresence } from '../routes/presence.js';
 
 function setupDb() {
   const dir = mkdtempSync(join(tmpdir(), 'relay-contacts-test-'));
@@ -1061,19 +1057,4 @@ describe('t-105: GET /contacts includes presence, removed presence endpoints', (
     db.close();
   });
 
-  // Step 3: GET /presence/:agent returns 410
-  it('step 3: getPresence returns 410 Gone', () => {
-    const db = withDb();
-    const result = getPresence(db, 'agent-b');
-    assert.equal((result as any).status, 410);
-    db.close();
-  });
-
-  // Step 4: GET /presence/batch returns 410
-  it('step 4: batchPresence returns 410 Gone', () => {
-    const db = withDb();
-    const result = batchPresence(db, ['agent-b']);
-    assert.equal((result as any).status, 410);
-    db.close();
-  });
 });

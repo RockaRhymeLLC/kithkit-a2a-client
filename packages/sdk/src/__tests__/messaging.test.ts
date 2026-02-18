@@ -361,9 +361,11 @@ describe('t-063: SDK E2E: send encrypted, receive + verify + decrypt', () => {
 
     await alice.send('bob', { text: 'Secret message!' });
 
-    // The relay DB's messages table should be empty (no content stored on relay)
-    const relayMessages = env.db.prepare('SELECT COUNT(*) as count FROM messages').get() as { count: number };
-    assert.equal(relayMessages.count, 0, 'Relay should have zero message content');
+    // The relay DB has no messages table at all (v1 compat removed in v6)
+    const table = env.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+    ).get() as { name: string } | undefined;
+    assert.equal(table, undefined, 'Relay should have no messages table — zero message content by design');
   });
 
   // Additional: bidirectional messaging

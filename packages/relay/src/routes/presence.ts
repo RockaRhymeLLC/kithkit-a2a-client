@@ -64,31 +64,6 @@ export function updatePresence(
 }
 
 /**
- * Get presence for a single agent — REMOVED in v3.
- * Presence info is now only available via GET /contacts.
- * Returns 410 Gone.
- */
-export function getPresence(
-  _db: Database.Database,
-  _agent: string,
-  _now: number = Date.now(),
-): { ok: false; status: 410; error: string } {
-  return { ok: false, status: 410, error: 'Gone — presence queries removed in v3, use GET /contacts instead' };
-}
-
-/**
- * Get presence for multiple agents — REMOVED in v3.
- * Returns 410 Gone.
- */
-export function batchPresence(
-  _db: Database.Database,
-  _agents: string[],
-  _now: number = Date.now(),
-): { ok: false; status: 410; error: string } {
-  return { ok: false, status: 410, error: 'Gone — presence queries removed in v3, use GET /contacts instead' };
-}
-
-/**
  * Check if an agent is online based on their last_seen timestamp.
  */
 function isOnline(lastSeen: string | null, now: number): boolean {

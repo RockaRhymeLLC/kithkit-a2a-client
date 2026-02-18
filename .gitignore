@@ -7,3 +7,4 @@ dist/
 .env
 *.db
 *.sqlite
+cc4me-network-data/
