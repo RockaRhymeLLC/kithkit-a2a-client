@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { CC4MeNetwork, type CC4MeNetworkInternalOptions } from '../client.js';
-import type { IRelayAPI, RelayContact, RelayPendingRequest, RelayPresence, RelayResponse } from '../relay-api.js';
+import type { IRelayAPI, RelayContact, RelayPendingRequest, RelayResponse } from '../relay-api.js';
 import type { WireEnvelope, Message, DeliveryStatus } from '../types.js';
 
 // Import relay functions directly for the mock
@@ -28,8 +28,6 @@ import {
 } from '../../../relay/src/routes/contacts.js';
 import {
   updatePresence as relayUpdatePresence,
-  getPresence as relayGetPresence,
-  batchPresence as relayBatchPresence,
 } from '../../../relay/src/routes/presence.js';
 
 function genKeypair() {
@@ -65,9 +63,9 @@ class MockRelayAPI implements IRelayAPI {
     if (this.offline) throw new Error('Relay unreachable');
   }
 
-  async requestContact(toAgent: string, greeting?: string): Promise<RelayResponse> {
+  async requestContact(toAgent: string): Promise<RelayResponse> {
     this.checkOnline();
-    const result = relayRequestContact(this.db, this.agentName, toAgent, greeting);
+    const result = relayRequestContact(this.db, this.agentName, toAgent);
     return { ok: result.ok, status: result.status || 200, error: result.error };
   }
 
@@ -106,21 +104,6 @@ class MockRelayAPI implements IRelayAPI {
     return { ok: result.ok, status: result.status || 200, error: result.error };
   }
 
-  async getPresence(agent: string): Promise<RelayResponse<RelayPresence>> {
-    this.checkOnline();
-    const presence = relayGetPresence(this.db, agent);
-    if (!presence) {
-      return { ok: false, status: 404, error: 'Agent not found' };
-    }
-    return { ok: true, status: 200, data: presence };
-  }
-
-  async batchPresence(agents: string[]): Promise<RelayResponse<RelayPresence[]>> {
-    this.checkOnline();
-    const batch = relayBatchPresence(this.db, agents);
-    return { ok: true, status: 200, data: batch };
-  }
-
   // Admin stubs — not tested in messaging.test.ts
   async createBroadcast(): Promise<RelayResponse<{ broadcastId: string }>> {
     return { ok: false, status: 403, error: 'Not admin' };
@@ -128,10 +111,13 @@ class MockRelayAPI implements IRelayAPI {
   async listBroadcasts(): Promise<RelayResponse<import('../relay-api.js').RelayBroadcast[]>> {
     return { ok: true, status: 200, data: [] };
   }
-  async approveAgent(): Promise<RelayResponse> {
+  async revokeAgent(): Promise<RelayResponse> {
     return { ok: false, status: 403, error: 'Not admin' };
   }
-  async revokeAgent(): Promise<RelayResponse> {
+  async rotateKey(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not admin' };
+  }
+  async recoverKey(): Promise<RelayResponse> {
     return { ok: false, status: 403, error: 'Not admin' };
   }
 

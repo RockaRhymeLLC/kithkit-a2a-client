@@ -35,9 +35,8 @@ export interface Message {
 
 export interface ContactRequest {
   from: string;
-  greeting: string;
+  requesterEmail: string;
   publicKey: string;
-  ownerEmail: string;
 }
 
 export interface Broadcast {
@@ -51,13 +50,6 @@ export interface DeliveryStatus {
   messageId: string;
   status: 'pending' | 'sending' | 'delivered' | 'expired' | 'failed';
   attempts: number;
-}
-
-export interface PresenceInfo {
-  agent: string;
-  online: boolean;
-  endpoint?: string;
-  lastSeen: string;
 }
 
 export interface DeliveryReport {
@@ -78,6 +70,10 @@ export interface Contact {
   publicKey: string;
   endpoint: string;
   addedAt: string;
+  online: boolean;
+  lastSeen: string | null;
+  keyUpdatedAt: string | null;
+  recoveryInProgress: boolean;
 }
 
 export interface GroupMessage {

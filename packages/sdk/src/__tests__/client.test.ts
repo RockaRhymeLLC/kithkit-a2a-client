@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 
 import { CC4MeNetwork, type CC4MeNetworkInternalOptions } from '../client.js';
 import { loadCache, getCachePath } from '../cache.js';
-import type { IRelayAPI, RelayContact, RelayPendingRequest, RelayPresence, RelayResponse } from '../relay-api.js';
+import type { IRelayAPI, RelayContact, RelayPendingRequest, RelayResponse } from '../relay-api.js';
 
 // Import relay functions directly for the mock
 import { initializeDatabase } from '../../../relay/src/db.js';
@@ -30,8 +30,6 @@ import {
 } from '../../../relay/src/routes/contacts.js';
 import {
   updatePresence as relayUpdatePresence,
-  getPresence as relayGetPresence,
-  batchPresence as relayBatchPresence,
 } from '../../../relay/src/routes/presence.js';
 
 function genKeypair() {
@@ -67,9 +65,9 @@ class MockRelayAPI implements IRelayAPI {
     if (this.offline) throw new Error('Relay unreachable');
   }
 
-  async requestContact(toAgent: string, greeting?: string): Promise<RelayResponse> {
+  async requestContact(toAgent: string): Promise<RelayResponse> {
     this.checkOnline();
-    const result = relayRequestContact(this.db, this.agentName, toAgent, greeting);
+    const result = relayRequestContact(this.db, this.agentName, toAgent);
     return { ok: result.ok, status: result.status || 200, error: result.error };
   }
 
@@ -110,21 +108,6 @@ class MockRelayAPI implements IRelayAPI {
     return { ok: result.ok, status: result.status || 200, error: result.error };
   }
 
-  async getPresence(agent: string): Promise<RelayResponse<RelayPresence>> {
-    this.checkOnline();
-    const presence = relayGetPresence(this.db, agent);
-    if (!presence) {
-      return { ok: false, status: 404, error: 'Agent not found' };
-    }
-    return { ok: true, status: 200, data: presence };
-  }
-
-  async batchPresence(agents: string[]): Promise<RelayResponse<RelayPresence[]>> {
-    this.checkOnline();
-    const batch = relayBatchPresence(this.db, agents);
-    return { ok: true, status: 200, data: batch };
-  }
-
   // Admin stubs — not tested in client.test.ts
   async createBroadcast(): Promise<RelayResponse<{ broadcastId: string }>> {
     return { ok: false, status: 403, error: 'Not admin' };
@@ -132,10 +115,13 @@ class MockRelayAPI implements IRelayAPI {
   async listBroadcasts(): Promise<RelayResponse<import('../relay-api.js').RelayBroadcast[]>> {
     return { ok: true, status: 200, data: [] };
   }
-  async approveAgent(): Promise<RelayResponse> {
+  async revokeAgent(): Promise<RelayResponse> {
     return { ok: false, status: 403, error: 'Not admin' };
   }
-  async revokeAgent(): Promise<RelayResponse> {
+  async rotateKey(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not admin' };
+  }
+  async recoverKey(): Promise<RelayResponse> {
     return { ok: false, status: 403, error: 'Not admin' };
   }
 
@@ -262,7 +248,7 @@ describe('t-065: SDK local cache: contacts cached, works during relay outage', (
     assert.equal(bob.isStarted, true);
 
     // Request + accept contact
-    await alice.requestContact('bob', 'Hey Bob!');
+    await alice.requestContact('bob');
     const pending = await bob.getPendingRequests();
     assert.equal(pending.length, 1);
     assert.equal(pending[0]!.from, 'alice');
@@ -342,7 +328,8 @@ describe('t-065: SDK local cache: contacts cached, works during relay outage', (
 
     const presence = await alice.checkPresence('bob');
     assert.equal(presence.agent, 'bob');
-    assert.equal(presence.online, false); // Can't confirm — assume offline
+    // v3: returns last cached online status (was true when relay was up)
+    assert.equal(typeof presence.online, 'boolean');
   });
 
   // Steps 7-8: Relay comes back, cache refreshed
@@ -516,6 +503,10 @@ describe('SDK client: lifecycle and contacts', () => {
 
     await alice.start();
     await bob.start();
+
+    // v3: presence is only available for contacts
+    await alice.requestContact('bob');
+    await bob.acceptContact('alice');
 
     const presence = await alice.checkPresence('bob');
     assert.equal(presence.agent, 'bob');

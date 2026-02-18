@@ -15,7 +15,6 @@ import type {
   ContactRequest,
   Broadcast,
   DeliveryStatus,
-  PresenceInfo,
   DeliveryReport,
   Contact,
   WireEnvelope,
@@ -233,8 +232,8 @@ export class CC4MeNetwork extends EventEmitter {
 
   // --- Contacts ---
 
-  async requestContact(username: string, greeting?: string): Promise<void> {
-    const result = await this.relayAPI.requestContact(username, greeting);
+  async requestContact(username: string): Promise<void> {
+    const result = await this.relayAPI.requestContact(username);
     if (!result.ok) {
       throw new Error(result.error || `Failed to request contact: ${result.status}`);
     }
@@ -245,9 +244,8 @@ export class CC4MeNetwork extends EventEmitter {
     if (!result.ok) return [];
     return (result.data || []).map((r) => ({
       from: r.from,
-      greeting: r.greeting || '',
+      requesterEmail: r.requesterEmail || '',
       publicKey: '',
-      ownerEmail: '',
     }));
   }
 
@@ -299,6 +297,10 @@ export class CC4MeNetwork extends EventEmitter {
         publicKey: c.publicKey,
         endpoint: c.endpoint || '',
         addedAt: c.addedAt,
+        online: c.online || false,
+        lastSeen: c.lastSeen || null,
+        keyUpdatedAt: null,
+        recoveryInProgress: false,
       }));
     }
 
@@ -312,28 +314,39 @@ export class CC4MeNetwork extends EventEmitter {
 
   // --- Presence ---
 
-  async checkPresence(username: string): Promise<PresenceInfo> {
+  /**
+   * Check if a contact is online. Uses contacts data (which includes
+   * online/lastSeen in v3) rather than a separate presence endpoint.
+   */
+  async checkPresence(username: string): Promise<{ agent: string; online: boolean; endpoint?: string; lastSeen: string }> {
+    // Try relay contacts (which now include presence info)
     try {
-      const result = await this.relayAPI.getPresence(username);
+      const result = await this.relayAPI.getContacts();
       if (result.ok && result.data) {
-        return {
-          agent: result.data.agent,
-          online: result.data.online,
-          endpoint: result.data.endpoint || undefined,
-          lastSeen: result.data.lastSeen || '',
-        };
+        this.updateContactsCache(result.data);
+        const contact = result.data.find(c => c.agent === username);
+        if (contact) {
+          return {
+            agent: username,
+            online: contact.online,
+            endpoint: contact.endpoint || undefined,
+            lastSeen: contact.lastSeen || '',
+          };
+        }
       }
     } catch {
-      // Relay unreachable — return cached data if available
-      const cached = this.getCachedContact(username);
-      if (cached) {
-        return {
-          agent: username,
-          online: false, // Can't confirm, assume offline
-          endpoint: cached.endpoint || undefined,
-          lastSeen: '',
-        };
-      }
+      // Relay unreachable — fall back to cache
+    }
+
+    // Fall back to cached contact data
+    const cached = this.getCachedContact(username);
+    if (cached) {
+      return {
+        agent: username,
+        online: cached.online || false,
+        endpoint: cached.endpoint || undefined,
+        lastSeen: cached.lastSeen || '',
+      };
     }
 
     return { agent: username, online: false, lastSeen: '' };
@@ -493,14 +506,6 @@ export class CC4MeNetwork extends EventEmitter {
         }
       },
 
-      /** Approve a pending agent registration. */
-      approveAgent: async (name: string): Promise<void> => {
-        const result = await relayAPI.approveAgent(name);
-        if (!result.ok) {
-          throw new Error(result.error || 'Failed to approve agent');
-        }
-      },
-
       /** Revoke an active agent. */
       revokeAgent: async (name: string): Promise<void> => {
         const result = await relayAPI.revokeAgent(name);
@@ -509,6 +514,24 @@ export class CC4MeNetwork extends EventEmitter {
         }
       },
     };
+  }
+
+  // --- Key Management ---
+
+  /** Rotate this agent's public key (authenticated — uses current key to sign). */
+  async rotateKey(newPublicKey: string): Promise<void> {
+    const result = await this.relayAPI.rotateKey(this.options.username, newPublicKey);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to rotate key');
+    }
+  }
+
+  /** Initiate key recovery (unauthenticated — verifies via owner email). */
+  async recoverKey(ownerEmail: string, newPublicKey: string): Promise<void> {
+    const result = await this.relayAPI.recoverKey(this.options.username, ownerEmail, newPublicKey);
+    if (!result.ok) {
+      throw new Error(result.error || 'Failed to initiate key recovery');
+    }
   }
 
   // --- Broadcasts ---
@@ -689,9 +712,28 @@ export class CC4MeNetwork extends EventEmitter {
 
     const result: GroupSendResult = { messageId, delivered: [], queued: [], failed: [] };
 
+    // Pre-fetch contacts for endpoint/presence resolution (one relay call for all)
+    let contactsMap: Map<string, { endpoint: string | null; online: boolean; publicKey: string }> = new Map();
+    try {
+      const contactsResult = await this.relayAPI.getContacts();
+      if (contactsResult.ok && contactsResult.data) {
+        this.updateContactsCache(contactsResult.data);
+        for (const c of contactsResult.data) {
+          contactsMap.set(c.agent, { endpoint: c.endpoint, online: c.online, publicKey: c.publicKey });
+        }
+      }
+    } catch {
+      // Fall back to cache
+      if (this.cache) {
+        for (const c of this.cache.contacts) {
+          contactsMap.set(c.username, { endpoint: c.endpoint, online: c.online || false, publicKey: c.publicKey });
+        }
+      }
+    }
+
     const deliverTo = async (member: RelayGroupMember) => {
-      const contact = this.getCachedContact(member.agent);
-      if (!contact?.publicKey) {
+      const contactInfo = contactsMap.get(member.agent) || this.getCachedContact(member.agent);
+      if (!contactInfo?.publicKey) {
         result.failed.push(member.agent);
         return;
       }
@@ -702,15 +744,15 @@ export class CC4MeNetwork extends EventEmitter {
         recipient: member.agent,
         payload,
         senderPrivateKey: this.privateKeyObj,
-        recipientPublicKeyBase64: contact.publicKey,
+        recipientPublicKeyBase64: contactInfo.publicKey,
         messageId,
         type: 'group',
         groupId,
       });
 
-      // Check presence
-      const presence = await this.checkPresence(member.agent);
-      if (!presence.online) {
+      // Check if online via contacts data (no separate presence call)
+      const online = 'online' in contactInfo ? contactInfo.online : false;
+      if (!online) {
         const retryId = randomUUID();
         const enqueued = this.retryQueue.enqueue(retryId, member.agent, payload, groupId);
         if (enqueued) result.queued.push(member.agent);
@@ -718,7 +760,7 @@ export class CC4MeNetwork extends EventEmitter {
         return;
       }
 
-      const endpoint = presence.endpoint || contact.endpoint;
+      const endpoint = contactInfo.endpoint;
       if (!endpoint) {
         result.failed.push(member.agent);
         return;
@@ -924,6 +966,8 @@ export class CC4MeNetwork extends EventEmitter {
         publicKey: c.publicKey,
         endpoint: c.endpoint,
         addedAt: c.since,
+        online: c.online,
+        lastSeen: c.lastSeen,
       })),
       lastUpdated: new Date().toISOString(),
     };
@@ -938,6 +982,10 @@ function toContact(rc: RelayContact): Contact {
     publicKey: rc.publicKey,
     endpoint: rc.endpoint || '',
     addedAt: rc.since,
+    online: rc.online,
+    lastSeen: rc.lastSeen,
+    keyUpdatedAt: rc.keyUpdatedAt,
+    recoveryInProgress: rc.recoveryInProgress,
   };
 }
 

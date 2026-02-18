@@ -14,19 +14,16 @@ export interface RelayContact {
   publicKey: string;
   endpoint: string | null;
   since: string;
+  online: boolean;
+  lastSeen: string | null;
+  keyUpdatedAt: string | null;
+  recoveryInProgress: boolean;
 }
 
 export interface RelayPendingRequest {
   from: string;
-  greeting: string | null;
+  requesterEmail: string | null;
   createdAt: string;
-}
-
-export interface RelayPresence {
-  agent: string;
-  online: boolean;
-  endpoint: string | null;
-  lastSeen: string | null;
 }
 
 export interface RelayBroadcast {
@@ -86,7 +83,7 @@ export interface RelayGroupChange {
  */
 export interface IRelayAPI {
   // Contacts
-  requestContact(toAgent: string, greeting?: string): Promise<RelayResponse>;
+  requestContact(toAgent: string): Promise<RelayResponse>;
   acceptContact(agent: string): Promise<RelayResponse>;
   denyContact(agent: string): Promise<RelayResponse>;
   removeContact(agent: string): Promise<RelayResponse>;
@@ -95,14 +92,15 @@ export interface IRelayAPI {
 
   // Presence
   heartbeat(endpoint: string): Promise<RelayResponse>;
-  getPresence(agent: string): Promise<RelayResponse<RelayPresence>>;
-  batchPresence(agents: string[]): Promise<RelayResponse<RelayPresence[]>>;
 
   // Admin
   createBroadcast(type: string, payload: string, signature: string): Promise<RelayResponse<{ broadcastId: string }>>;
   listBroadcasts(type?: string): Promise<RelayResponse<RelayBroadcast[]>>;
-  approveAgent(agent: string): Promise<RelayResponse>;
   revokeAgent(agent: string): Promise<RelayResponse>;
+
+  // Key management
+  rotateKey(agent: string, newPublicKey: string): Promise<RelayResponse>;
+  recoverKey(agent: string, ownerEmail: string, newPublicKey: string): Promise<RelayResponse>;
 
   // Groups
   createGroup(name: string, settings?: { membersCanInvite?: boolean; membersCanSend?: boolean; maxMembers?: number }): Promise<RelayResponse<RelayGroup>>;
@@ -200,8 +198,8 @@ export class HttpRelayAPI implements IRelayAPI {
     return { ok: false, status: 0, error: 'Max retries exceeded' };
   }
 
-  async requestContact(toAgent: string, greeting?: string): Promise<RelayResponse> {
-    return this.request('POST', '/contacts/request', { to: toAgent, greeting });
+  async requestContact(toAgent: string): Promise<RelayResponse> {
+    return this.request('POST', '/contacts/request', { to: toAgent });
   }
 
   async acceptContact(agent: string): Promise<RelayResponse> {
@@ -228,14 +226,6 @@ export class HttpRelayAPI implements IRelayAPI {
     return this.request('PUT', '/presence', { endpoint });
   }
 
-  async getPresence(agent: string): Promise<RelayResponse<RelayPresence>> {
-    return this.request<RelayPresence>('GET', `/presence/${agent}`);
-  }
-
-  async batchPresence(agents: string[]): Promise<RelayResponse<RelayPresence[]>> {
-    return this.request<RelayPresence[]>('GET', `/presence/batch?agents=${agents.join(',')}`);
-  }
-
   async createBroadcast(type: string, payload: string, signature: string): Promise<RelayResponse<{ broadcastId: string }>> {
     return this.request<{ broadcastId: string }>('POST', '/admin/broadcast', { type, payload, signature });
   }
@@ -245,12 +235,16 @@ export class HttpRelayAPI implements IRelayAPI {
     return this.request<RelayBroadcast[]>('GET', path);
   }
 
-  async approveAgent(agent: string): Promise<RelayResponse> {
-    return this.request('POST', `/registry/agents/${agent}/approve`);
-  }
-
   async revokeAgent(agent: string): Promise<RelayResponse> {
     return this.request('POST', `/registry/agents/${agent}/revoke`);
+  }
+
+  async rotateKey(agent: string, newPublicKey: string): Promise<RelayResponse> {
+    return this.request('POST', `/registry/agents/${agent}/rotate-key`, { newPublicKey });
+  }
+
+  async recoverKey(agent: string, ownerEmail: string, newPublicKey: string): Promise<RelayResponse> {
+    return this.request('POST', `/registry/agents/${agent}/recover`, { ownerEmail, newPublicKey });
   }
 
   // Groups

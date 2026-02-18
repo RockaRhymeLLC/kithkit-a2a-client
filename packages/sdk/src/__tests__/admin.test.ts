@@ -19,7 +19,6 @@ import type {
   IRelayAPI,
   RelayContact,
   RelayPendingRequest,
-  RelayPresence,
   RelayBroadcast,
   RelayResponse,
 } from '../relay-api.js';
@@ -35,8 +34,6 @@ import {
 } from '../../../relay/src/routes/contacts.js';
 import {
   updatePresence as relayUpdatePresence,
-  getPresence as relayGetPresence,
-  batchPresence as relayBatchPresence,
 } from '../../../relay/src/routes/presence.js';
 import {
   createBroadcast as relayCreateBroadcast,
@@ -103,9 +100,9 @@ class MockRelayAPI implements IRelayAPI {
     if (this.offline) throw new Error('Relay unreachable');
   }
 
-  async requestContact(toAgent: string, greeting?: string): Promise<RelayResponse> {
+  async requestContact(toAgent: string): Promise<RelayResponse> {
     this.checkOnline();
-    const result = relayRequestContact(this.db, this.agentName, toAgent, greeting);
+    const result = relayRequestContact(this.db, this.agentName, toAgent);
     return { ok: result.ok, status: result.status || 200, error: result.error };
   }
 
@@ -143,19 +140,6 @@ class MockRelayAPI implements IRelayAPI {
     return { ok: result.ok, status: result.status || 200, error: result.error };
   }
 
-  async getPresence(agent: string): Promise<RelayResponse<RelayPresence>> {
-    this.checkOnline();
-    const presence = relayGetPresence(this.db, agent);
-    if (!presence) return { ok: false, status: 404, error: 'Agent not found' };
-    return { ok: true, status: 200, data: presence };
-  }
-
-  async batchPresence(agents: string[]): Promise<RelayResponse<RelayPresence[]>> {
-    this.checkOnline();
-    const batch = relayBatchPresence(this.db, agents);
-    return { ok: true, status: 200, data: batch };
-  }
-
   async createBroadcast(type: string, payload: string, signature: string): Promise<RelayResponse<{ broadcastId: string }>> {
     this.checkOnline();
     const result = relayCreateBroadcast(this.db, this.agentName, type, payload, signature);
@@ -167,13 +151,6 @@ class MockRelayAPI implements IRelayAPI {
     this.checkOnline();
     const broadcasts = relayListBroadcasts(this.db, type);
     return { ok: true, status: 200, data: broadcasts };
-  }
-
-  async approveAgent(agent: string): Promise<RelayResponse> {
-    this.checkOnline();
-    const result = relayApproveAgent(this.db, agent, this.agentName);
-    if (!result.ok) return { ok: false, status: result.status || 400, error: result.error };
-    return { ok: true, status: 200 };
   }
 
   async revokeAgent(agent: string): Promise<RelayResponse> {
@@ -221,6 +198,12 @@ class MockRelayAPI implements IRelayAPI {
     return { ok: false, status: 403, error: 'Not implemented' };
   }
   async transferGroupOwnership(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async rotateKey(): Promise<RelayResponse> {
+    return { ok: false, status: 403, error: 'Not implemented' };
+  }
+  async recoverKey(): Promise<RelayResponse> {
     return { ok: false, status: 403, error: 'Not implemented' };
   }
 }
@@ -353,24 +336,16 @@ describe('t-070: SDK admin ops + delivery diagnostics', () => {
     assert.equal(receivedBroadcasts.length, 1); // Still 1
   });
 
-  // Step 4: Admin approves a pending agent
-  it('step 4: admin.approveAgent changes pending agent to active', async () => {
+  // Step 4: approveAgent removed from SDK in v3 (auto-approve at registration)
+  it('step 4: approveAgent is not available on admin interface (v3)', async () => {
     const env = setupTestEnv();
     const admin = createNetworkClient(env, 'admin-agent');
     track(env, admin);
 
-    // Create a pending agent
-    const newAgentKeys = genKeypair();
-    createPendingAgent(env.db, 'new-agent', newAgentKeys.publicKeyBase64);
-
     await admin.start();
 
     const adminOps = admin.asAdmin(Buffer.from(env.adminKeys.privateKeyDer));
-    await adminOps.approveAgent('new-agent');
-
-    // Verify agent is now active
-    const row = env.db.prepare("SELECT status FROM agents WHERE name = 'new-agent'").get() as { status: string };
-    assert.equal(row.status, 'active');
+    assert.equal(typeof (adminOps as any).approveAgent, 'undefined');
   });
 
   // Step 5: Admin revokes an active agent
@@ -467,7 +442,7 @@ describe('t-070: SDK admin ops + delivery diagnostics', () => {
     await bob.start();
 
     // Admin sends a contact request to Bob
-    await admin.requestContact('bob', 'Hey Bob!');
+    await admin.requestContact('bob');
 
     // Bob checks for contact requests
     const receivedRequests: ContactRequest[] = [];

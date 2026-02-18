@@ -16,6 +16,8 @@ export interface CachedContact {
   publicKey: string;
   endpoint: string | null;
   addedAt: string;
+  online: boolean;
+  lastSeen: string | null;
 }
 
 export interface CacheData {

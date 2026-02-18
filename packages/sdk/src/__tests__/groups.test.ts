@@ -23,7 +23,6 @@ import type {
   IRelayAPI,
   RelayContact,
   RelayPendingRequest,
-  RelayPresence,
   RelayBroadcast,
   RelayResponse,
   RelayGroup,
@@ -41,7 +40,6 @@ import {
 } from '../../../relay/src/routes/contacts.js';
 import {
   updatePresence as relayUpdatePresence,
-  getPresence as relayGetPresence,
 } from '../../../relay/src/routes/presence.js';
 import {
   createGroup as relayCreateGroup,
@@ -200,12 +198,11 @@ class MockRelayAPI implements IRelayAPI {
   async getContacts(): Promise<RelayResponse<RelayContact[]>> { return { ok: true, status: 200, data: [] }; }
   async getPendingRequests(): Promise<RelayResponse<RelayPendingRequest[]>> { return { ok: true, status: 200, data: [] }; }
   async heartbeat(): Promise<RelayResponse> { return { ok: true, status: 200 }; }
-  async getPresence(): Promise<RelayResponse<RelayPresence>> { return { ok: false, status: 404, error: 'stub' }; }
-  async batchPresence(): Promise<RelayResponse<RelayPresence[]>> { return { ok: true, status: 200, data: [] }; }
   async createBroadcast(): Promise<RelayResponse<{ broadcastId: string }>> { return { ok: false, status: 403 }; }
   async listBroadcasts(): Promise<RelayResponse<RelayBroadcast[]>> { return { ok: true, status: 200, data: [] }; }
-  async approveAgent(): Promise<RelayResponse> { return { ok: false, status: 403 }; }
   async revokeAgent(): Promise<RelayResponse> { return { ok: false, status: 403 }; }
+  async rotateKey(): Promise<RelayResponse> { return { ok: false, status: 403 }; }
+  async recoverKey(): Promise<RelayResponse> { return { ok: false, status: 403 }; }
 }
 
 // ================================================================
@@ -684,12 +681,7 @@ class FullMockRelayAPI implements IRelayAPI {
     return { ok: result.ok, status: result.status || 200, error: result.error };
   }
 
-  async getPresence(agent: string): Promise<RelayResponse<RelayPresence>> {
-    this.checkOnline();
-    const presence = relayGetPresence(this.db, agent);
-    if (!presence) return { ok: false, status: 404, error: 'Agent not found' };
-    return { ok: true, status: 200, data: presence };
-  }
+  // getPresence removed in v3 — presence is in getContacts response
 
   // Groups — real DB
   async createGroup(name: string, settings?: any): Promise<RelayResponse<RelayGroup>> {
@@ -779,11 +771,11 @@ class FullMockRelayAPI implements IRelayAPI {
   async denyContact(): Promise<RelayResponse> { return { ok: true, status: 200 }; }
   async removeContact(): Promise<RelayResponse> { return { ok: true, status: 200 }; }
   async getPendingRequests(): Promise<RelayResponse<RelayPendingRequest[]>> { return { ok: true, status: 200, data: [] }; }
-  async batchPresence(): Promise<RelayResponse<RelayPresence[]>> { return { ok: true, status: 200, data: [] }; }
   async createBroadcast(): Promise<RelayResponse<{ broadcastId: string }>> { return { ok: false, status: 403 }; }
   async listBroadcasts(): Promise<RelayResponse<RelayBroadcast[]>> { return { ok: true, status: 200, data: [] }; }
-  async approveAgent(): Promise<RelayResponse> { return { ok: false, status: 403 }; }
   async revokeAgent(): Promise<RelayResponse> { return { ok: false, status: 403 }; }
+  async rotateKey(): Promise<RelayResponse> { return { ok: false, status: 403 }; }
+  async recoverKey(): Promise<RelayResponse> { return { ok: false, status: 403 }; }
 }
 
 // ================================================================
