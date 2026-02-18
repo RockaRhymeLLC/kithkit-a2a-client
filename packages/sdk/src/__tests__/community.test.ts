@@ -19,6 +19,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { CC4MeNetwork, type CC4MeNetworkInternalOptions } from '../client.js';
+import { CommunityRelayManager } from '../community-manager.js';
+import type { CommunityConfig } from '../types.js';
 import type { IRelayAPI, RelayResponse, RelayContact, RelayPendingRequest, RelayBroadcast, RelayGroup, RelayGroupMember, RelayGroupInvitation, RelayGroupChange } from '../relay-api.js';
 
 function genKeypair() {
@@ -155,5 +157,97 @@ describe('t-100: CommunityConfig type validation and mutual exclusion', () => {
         } as CC4MeNetworkInternalOptions);
       }, /Invalid community name|must be alphanumeric/, `Should reject name: '${name}'`);
     }
+  });
+});
+
+// ─── t-101: CommunityRelayManager construction and API routing ───────────────
+
+describe('t-101: CommunityRelayManager construction and API routing', () => {
+  const kp = genKeypair();
+
+  // Shared test fixtures
+  const homePrimaryMock = createMockRelayAPI();
+  const homeFailoverMock = createMockRelayAPI();
+  const companyPrimaryMock = createMockRelayAPI();
+
+  const communities: CommunityConfig[] = [
+    { name: 'home', primary: 'https://relay.bmobot.ai', failover: 'https://backup.bmobot.ai' },
+    { name: 'company', primary: 'https://relay.acme.com' },
+  ];
+
+  const relayAPIs: Record<string, IRelayAPI> = {
+    'home:primary': homePrimaryMock,
+    'home:failover': homeFailoverMock,
+    'company:primary': companyPrimaryMock,
+  };
+
+  function createManager(overrideAPIs?: Record<string, IRelayAPI>): CommunityRelayManager {
+    return new CommunityRelayManager(
+      communities,
+      'test-agent',
+      kp.privateKey,
+      3, // failoverThreshold
+      overrideAPIs ?? relayAPIs,
+    );
+  }
+
+  it('Step 1: creates manager with 2 communities (3 API instances)', () => {
+    const manager = createManager();
+    // 2 communities configured
+    assert.equal(manager.getCommunityNames().length, 2);
+    // All 3 APIs accessible (home primary, home failover via state, company primary)
+    assert.ok(manager.getActiveApi('home'));
+    assert.ok(manager.getActiveApi('company'));
+    assert.equal(manager.getActiveRelayType('home'), 'primary');
+    assert.equal(manager.getActiveRelayType('company'), 'primary');
+  });
+
+  it('Step 2: getActiveApi("home") returns primary API', () => {
+    const manager = createManager();
+    assert.equal(manager.getActiveApi('home'), homePrimaryMock);
+  });
+
+  it('Step 3: getActiveApi("company") returns primary API', () => {
+    const manager = createManager();
+    assert.equal(manager.getActiveApi('company'), companyPrimaryMock);
+  });
+
+  it('Step 4: getActiveApi("nonexistent") throws', () => {
+    const manager = createManager();
+    assert.throws(
+      () => manager.getActiveApi('nonexistent'),
+      /Community not found/,
+    );
+  });
+
+  it('Step 5: getCommunityNames() returns names in config order', () => {
+    const manager = createManager();
+    assert.deepEqual(manager.getCommunityNames(), ['home', 'company']);
+  });
+
+  it('Step 6: getCommunityByHostname resolves known relay hostname', () => {
+    const manager = createManager();
+    assert.equal(manager.getCommunityByHostname('relay.bmobot.ai'), 'home');
+    assert.equal(manager.getCommunityByHostname('backup.bmobot.ai'), 'home');
+    assert.equal(manager.getCommunityByHostname('relay.acme.com'), 'company');
+  });
+
+  it('Step 7: getCommunityByHostname returns undefined for unknown hostname', () => {
+    const manager = createManager();
+    assert.equal(manager.getCommunityByHostname('unknown.host.com'), undefined);
+  });
+
+  it('Step 8: injected relayAPIs override HttpRelayAPI creation', () => {
+    const customPrimary = createMockRelayAPI();
+    const customFailover = createMockRelayAPI();
+    const manager = new CommunityRelayManager(
+      [{ name: 'test', primary: 'https://test.example.com', failover: 'https://backup.example.com' }],
+      'test-agent',
+      kp.privateKey,
+      3,
+      { 'test:primary': customPrimary, 'test:failover': customFailover },
+    );
+    // Verify the injected mocks are used, not HttpRelayAPI instances
+    assert.equal(manager.getActiveApi('test'), customPrimary);
   });
 });
