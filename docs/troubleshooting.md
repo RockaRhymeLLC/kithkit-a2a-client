@@ -353,7 +353,7 @@ The CC4Me daemon's `agent-comms.ts` already uses this pattern for LAN peer commu
 
 ### mDNS .local hostname resolution failures
 
-**Symptom**: LAN peer connections fail when using `.local` hostnames (e.g., `davids-mac-mini.local`). Connections work by IP address.
+**Symptom**: LAN peer connections fail when using `.local` hostnames (e.g., `my-machine.local`). Connections work by IP address.
 
 **Cause**: macOS mDNS resolution (`.local`) can break silently. Known trigger: enabling File Sharing in System Settings creates a conflict with `mDNSResponder`.
 
@@ -373,7 +373,7 @@ agent-comms:
     - name: "peer-agent"
       host: "peers-machine.lan"   # Use .lan, not .local
       port: 3847
-      ip: "192.168.12.244"       # Fallback IP
+      ip: "192.168.1.50"         # Fallback IP
 ```
 
 3. **Verify resolution**:
