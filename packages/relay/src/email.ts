@@ -52,7 +52,7 @@ export async function sendVerificationCode(
   sender: EmailSender,
   ip: string,
   now: number = Date.now(),
-): Promise<{ ok: boolean; error?: string; status?: number }> {
+): Promise<{ ok: boolean; error?: string; status?: number; retryAfter?: number; rateLimit?: number; rateLimitRemaining?: number; rateLimitReset?: string }> {
   // Rate limit: max 3 sends per hour per IP
   const rateLimitKey = `verify-send:${ip}`;
   const windowStart = new Date(now - 60 * 60 * 1000).toISOString();
@@ -64,7 +64,15 @@ export async function sendVerificationCode(
   if (rateEntry) {
     const windowMs = new Date(rateEntry.window_start).getTime();
     if (now - windowMs < 60 * 60 * 1000 && rateEntry.count >= MAX_SENDS_PER_HOUR) {
-      return { ok: false, error: 'Rate limit exceeded', status: 429 };
+      const resetMs = windowMs + 60 * 60 * 1000;
+      const retryAfter = Math.ceil((resetMs - now) / 1000);
+      return {
+        ok: false, error: 'Rate limit exceeded', status: 429,
+        retryAfter,
+        rateLimit: MAX_SENDS_PER_HOUR,
+        rateLimitRemaining: 0,
+        rateLimitReset: new Date(resetMs).toISOString(),
+      };
     }
     if (now - windowMs >= 60 * 60 * 1000) {
       // Reset window

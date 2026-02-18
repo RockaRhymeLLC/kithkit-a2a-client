@@ -85,10 +85,18 @@ function isBlocked(db: Database.Database, blocker: string, blocked: string): boo
   return !!row;
 }
 
+interface RateLimitResult {
+  allowed: boolean;
+  retryAfter?: number;   // seconds until window resets
+  limit?: number;
+  remaining?: number;
+  resetAt?: string;      // ISO timestamp
+}
+
 /**
- * Check rate limit for contact requests. Returns true if under limit.
+ * Check rate limit for contact requests. Returns rate limit state.
  */
-function checkRateLimit(db: Database.Database, agent: string): boolean {
+function checkRateLimit(db: Database.Database, agent: string): RateLimitResult {
   const key = `contacts:request:${agent}`;
   const now = Date.now();
   const windowStart = new Date(now - RATE_LIMIT_WINDOW_MS).toISOString();
@@ -102,7 +110,7 @@ function checkRateLimit(db: Database.Database, agent: string): boolean {
     db.prepare(
       'INSERT INTO rate_limits (key, count, window_start) VALUES (?, 1, ?)'
     ).run(key, new Date(now).toISOString());
-    return true;
+    return { allowed: true, limit: RATE_LIMIT_MAX, remaining: RATE_LIMIT_MAX - 1 };
   }
 
   // Check if window has expired
@@ -111,17 +119,22 @@ function checkRateLimit(db: Database.Database, agent: string): boolean {
     db.prepare(
       'UPDATE rate_limits SET count = 1, window_start = ? WHERE key = ?'
     ).run(new Date(now).toISOString(), key);
-    return true;
+    return { allowed: true, limit: RATE_LIMIT_MAX, remaining: RATE_LIMIT_MAX - 1 };
   }
 
   // Within window — check count
+  const windowStartMs = new Date(row.window_start).getTime();
+  const resetMs = windowStartMs + RATE_LIMIT_WINDOW_MS;
+  const resetAt = new Date(resetMs).toISOString();
+  const retryAfter = Math.ceil((resetMs - now) / 1000);
+
   if (row.count >= RATE_LIMIT_MAX) {
-    return false;
+    return { allowed: false, retryAfter, limit: RATE_LIMIT_MAX, remaining: 0, resetAt };
   }
 
   // Increment
   db.prepare('UPDATE rate_limits SET count = count + 1 WHERE key = ?').run(key);
-  return true;
+  return { allowed: true, limit: RATE_LIMIT_MAX, remaining: RATE_LIMIT_MAX - 1 - row.count };
 }
 
 /**
@@ -167,8 +180,16 @@ export function requestContact(
   }
 
   // Rate limit check
-  if (!checkRateLimit(db, fromAgent)) {
-    return { ok: false, status: 429, error: 'Rate limit exceeded — max 100 contact requests per hour' };
+  const rateCheck = checkRateLimit(db, fromAgent);
+  if (!rateCheck.allowed) {
+    return {
+      ok: false, status: 429,
+      error: 'Rate limit exceeded — max 100 contact requests per hour',
+      retryAfter: rateCheck.retryAfter,
+      rateLimit: rateCheck.limit,
+      rateLimitRemaining: 0,
+      rateLimitReset: rateCheck.resetAt,
+    } as any;
   }
 
   const { agent_a, agent_b } = orderPair(fromAgent, toAgent);

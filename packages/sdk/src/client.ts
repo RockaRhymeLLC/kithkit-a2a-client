@@ -5,7 +5,7 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { createPrivateKey, randomUUID, sign as cryptoSign, type KeyObject } from 'node:crypto';
+import { createPrivateKey, generateKeyPairSync, randomUUID, sign as cryptoSign, type KeyObject } from 'node:crypto';
 import type {
   CC4MeNetworkOptions,
   SendResult,
@@ -13,6 +13,7 @@ import type {
   GroupMessage,
   Message,
   ContactRequest,
+  ContactActionResult,
   Broadcast,
   DeliveryStatus,
   DeliveryReport,
@@ -176,6 +177,18 @@ export class CC4MeNetwork extends EventEmitter {
     });
   }
 
+  /**
+   * Generate a new Ed25519 keypair suitable for CC4Me Network registration.
+   * Returns base64-encoded DER keys (SPKI for public, PKCS8 for private).
+   */
+  static generateKeypair(): { publicKey: string; privateKey: string } {
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    return {
+      publicKey: publicKey.export({ format: 'der', type: 'spki' }).toString('base64'),
+      privateKey: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'),
+    };
+  }
+
   /** Start the network client (loads cache, begins heartbeat, starts retry queue). */
   async start(): Promise<void> {
     if (this.started) return;
@@ -232,11 +245,12 @@ export class CC4MeNetwork extends EventEmitter {
 
   // --- Contacts ---
 
-  async requestContact(username: string): Promise<void> {
+  async requestContact(username: string): Promise<ContactActionResult> {
     const result = await this.relayAPI.requestContact(username);
     if (!result.ok) {
       throw new Error(result.error || `Failed to request contact: ${result.status}`);
     }
+    return { ok: true, status: result.status };
   }
 
   async getPendingRequests(): Promise<ContactRequest[]> {
@@ -249,13 +263,14 @@ export class CC4MeNetwork extends EventEmitter {
     }));
   }
 
-  async acceptContact(username: string): Promise<void> {
+  async acceptContact(username: string): Promise<ContactActionResult> {
     const result = await this.relayAPI.acceptContact(username);
     if (!result.ok) {
       throw new Error(result.error || `Failed to accept contact: ${result.status}`);
     }
     // Refresh contacts cache
     await this.refreshContactsFromRelay();
+    return { ok: true, status: result.status };
   }
 
   async denyContact(username: string): Promise<void> {

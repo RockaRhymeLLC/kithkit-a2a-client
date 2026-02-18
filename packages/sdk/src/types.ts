@@ -85,6 +85,11 @@ export interface GroupMessage {
   verified: boolean;
 }
 
+export interface ContactActionResult {
+  ok: true;
+  status: number;
+}
+
 export interface GroupSendResult {
   messageId: string;
   delivered: string[];

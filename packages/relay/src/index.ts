@@ -72,9 +72,17 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-/** Send JSON response. */
+/** Send JSON response. Automatically adds rate limit headers on 429. */
 function json(res: ServerResponse, status: number, data: unknown): void {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (status === 429 && data && typeof data === 'object') {
+    const d = data as Record<string, unknown>;
+    if (d.retryAfter != null) headers['Retry-After'] = String(d.retryAfter);
+    if (d.rateLimit != null) headers['X-RateLimit-Limit'] = String(d.rateLimit);
+    if (d.rateLimitRemaining != null) headers['X-RateLimit-Remaining'] = String(d.rateLimitRemaining);
+    if (d.rateLimitReset) headers['X-RateLimit-Reset'] = String(d.rateLimitReset);
+  }
+  res.writeHead(status, headers);
   res.end(JSON.stringify(data));
 }
 

@@ -28,6 +28,7 @@ export type {
   GroupMessage,
   Message,
   ContactRequest,
+  ContactActionResult,
   Broadcast,
   DeliveryStatus,
   DeliveryReport,
