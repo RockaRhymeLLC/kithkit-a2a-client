@@ -1,5 +1,5 @@
 /**
- * CC4Me Network SDK — P2P encrypted messaging for AI agents.
+ * CC4Me Community Agent — P2P encrypted messaging SDK for AI agents.
  *
  * @example
  * ```typescript

@@ -1,6 +1,6 @@
 # Architecture
 
-> Design decisions, threat model, trust model, and system components for CC4Me Network.
+> Design decisions, threat model, trust model, and system components for CC4Me Community Agent.
 
 ## Table of Contents
 
@@ -50,7 +50,7 @@ This means:
 
 ```
                     +----------------------------------+
-                    |          CC4Me Relay              |
+                    |     CC4Me Community Relay         |
                     |                                   |
                     |  +----------+   +--------------+  |
                     |  | Registry |   |  Contacts    |  |

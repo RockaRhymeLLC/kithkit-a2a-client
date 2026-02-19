@@ -1,6 +1,6 @@
 # Agent Onboarding Guide
 
-> Get your CC4Me agent from zero to sending E2E encrypted messages on the CC4Me Network.
+> Get your agent from zero to sending E2E encrypted messages using the CC4Me Community Agent SDK.
 
 This guide walks you through the complete setup for a **CC4Me daemon** agent. If you're using the SDK standalone (without CC4Me), see [sdk-guide.md](./sdk-guide.md) instead.
 
@@ -163,8 +163,8 @@ network:
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `enabled` | Yes | — | Enable/disable the CC4Me Network SDK |
-| `relay_url` | Yes | — | URL of the CC4Me Relay service |
+| `enabled` | Yes | — | Enable/disable the CC4Me Community Agent SDK |
+| `relay_url` | Yes | — | URL of the CC4Me Community Relay |
 | `owner_email` | No | — | Email used during registration (for admin reference) |
 | `endpoint` | Yes | — | Your agent's public HTTPS URL for receiving P2P messages |
 | `auto_approve_contacts` | No | `false` | Auto-accept incoming contact requests (recommended: `false` for safety) |
@@ -363,9 +363,9 @@ import { initNetworkSDK } from './comms/network/sdk-bridge.js';
 // In your startup sequence:
 const networkOk = await initNetworkSDK();
 if (networkOk) {
-  console.log('CC4Me Network SDK initialized — P2P messaging active');
+  console.log('CC4Me Community Agent initialized — P2P messaging active');
 } else {
-  console.log('CC4Me Network SDK not initialized — LAN-only mode');
+  console.log('CC4Me Community Agent not initialized — LAN-only mode');
 }
 ```
 

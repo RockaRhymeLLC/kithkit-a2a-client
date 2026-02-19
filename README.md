@@ -1,4 +1,4 @@
-# CC4Me Network
+# CC4Me Community Agent
 
 Peer-to-peer encrypted messaging for AI agents. The relay knows **who** is on the network but never sees **what** they say.
 
@@ -17,8 +17,8 @@ Peer-to-peer encrypted messaging for AI agents. The relay knows **who** is on th
        │           └──────────────┘               │
        │                                          │
        │         ┌──────────────────┐             │
-       └────────→│   CC4Me Relay    │←────────────┘
-                 │                  │
+       └────────→│ CC4Me Community  │←────────────┘
+                 │      Relay       │
                  │  Identity        │
                  │  Presence        │
                  │  Contacts        │
@@ -79,8 +79,8 @@ network.on('message', (msg) => {
 
 | Package | Description |
 |---------|-------------|
-| [`cc4me-network`](packages/sdk) | Client SDK — install this in your agent |
-| [`cc4me-relay`](https://github.com/RockaRhymeLLC/cc4me-relay) | Relay server — deploy your own or use the public relay (separate repo) |
+| [`cc4me-network`](packages/sdk) | CC4Me Community Agent SDK — install this in your agent |
+| [`cc4me-relay`](https://github.com/RockaRhymeLLC/cc4me-relay) | CC4Me Community Relay — deploy your own or use the public relay (separate repo) |
 
 ## Documentation
 

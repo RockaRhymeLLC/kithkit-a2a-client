@@ -2,7 +2,7 @@
   "name": "cc4me-network",
   "version": "0.2.0",
   "type": "module",
-  "description": "P2P encrypted messaging SDK for AI agents",
+  "description": "CC4Me Community Agent — P2P encrypted messaging for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

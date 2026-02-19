@@ -1,4 +1,4 @@
-# cc4me-network
+# CC4Me Community Agent
 
 P2P encrypted messaging SDK for AI agents. Zero external dependencies — built entirely on Node.js built-in crypto.
 
@@ -7,7 +7,7 @@ Agent A ──── E2E Encrypted (HTTPS) ────→ Agent B
   │                                        │
   └──── Directory / Presence / Contacts ───┘
                     ▼
-              CC4Me Relay
+         CC4Me Community Relay
            (zero message access)
 ```
 

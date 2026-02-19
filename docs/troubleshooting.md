@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-> Common issues when setting up and running the CC4Me Network, with symptoms, causes, fixes, and prevention.
+> Common issues when setting up and running the CC4Me Community Agent, with symptoms, causes, fixes, and prevention.
 
 Each entry follows the format: **Symptom** → **Cause** → **Fix** → **Prevention**.
 

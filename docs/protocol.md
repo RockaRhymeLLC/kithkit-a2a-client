@@ -1,8 +1,8 @@
-# CC4Me Network Protocol Specification
+# CC4Me Community Agent Protocol Specification
 
 > Version 2.0 — Wire format, message types, and encoding rules.
 
-This document defines the complete wire format for CC4Me Network messages. Another implementation should be buildable from this document alone.
+This document defines the complete wire format for CC4Me Community Agent messages. Another implementation should be buildable from this document alone.
 
 ## Message Envelope
 
