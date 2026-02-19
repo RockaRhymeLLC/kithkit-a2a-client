@@ -545,8 +545,8 @@ describe('t-103: Failover detection and sticky switch', () => {
     assert.equal(manager.getFailureCount('home'), 2);
   });
 
-  // Step 8: Startup grace — failures before first success don't count
-  it('step 8: startup grace period — failures before first success ignored', async () => {
+  // Step 8: Startup grace — fewer than threshold startup failures tolerated
+  it('step 8: startup grace — fewer than threshold failures tolerated', async () => {
     const homePrimary = createControllableMockRelayAPI();
     const homeFailover = createControllableMockRelayAPI();
     const companyPrimary = createControllableMockRelayAPI();
@@ -559,15 +559,39 @@ describe('t-103: Failover detection and sticky switch', () => {
     const events: Array<{ community: string; status: string }> = [];
     manager.on('community:status', (e) => events.push(e));
 
-    // 3 failures before any success — should NOT trigger failover
+    // 2 failures before any success — under threshold, still in grace
     homePrimary.setNextResponse({ ok: false, status: 500, error: 'down' });
-    await manager.callApi('home', api => api.getContacts());
     await manager.callApi('home', api => api.getContacts());
     await manager.callApi('home', api => api.getContacts());
 
     assert.equal(manager.getFailureCount('home'), 0); // Not counting during grace
     assert.equal(manager.getActiveRelayType('home'), 'primary'); // Still on primary
     assert.equal(events.length, 0); // No failover event
+  });
+
+  // Step 8b: Startup grace exhausted — triggers failover when primary never works
+  it('step 8b: startup grace exhausted — failover when primary never works', async () => {
+    const homePrimary = createControllableMockRelayAPI();
+    const homeFailover = createControllableMockRelayAPI();
+    const companyPrimary = createControllableMockRelayAPI();
+
+    const manager = new CommunityRelayManager(
+      communities, 'test-agent', kp.privateKey, 3,
+      { 'home:primary': homePrimary.api, 'home:failover': homeFailover.api, 'company:primary': companyPrimary.api },
+    );
+
+    const events: Array<{ community: string; status: string }> = [];
+    manager.on('community:status', (e) => events.push(e));
+
+    // 3 failures (= threshold) before any success — triggers failover
+    homePrimary.setNextResponse({ ok: false, status: 500, error: 'down' });
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+    await manager.callApi('home', api => api.getContacts());
+
+    assert.equal(manager.getActiveRelayType('home'), 'failover'); // Switched to failover
+    assert.equal(events.length, 1); // Failover event emitted
+    assert.equal(events[0].status, 'failover');
   });
 });
 

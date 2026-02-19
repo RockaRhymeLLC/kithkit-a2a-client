@@ -7,9 +7,13 @@
  *
  * Failure tracking via callApi():
  * - Success (ok: true): resets consecutive failure counter
- * - Network/server error (status 0 or >= 500): increments counter (after first success)
+ * - Network/server error (status 0 or >= 500): increments counter
  * - Client error (4xx): no counter change (application-level response)
- * - Thrown error: increments counter (after first success)
+ * - Thrown error: increments counter
+ *
+ * Startup grace: during startup (before first successful call), failures are
+ * counted separately. After failoverThreshold startup failures with zero
+ * successes, the grace period ends and failover triggers immediately.
  */
 
 import { EventEmitter } from 'node:events';
@@ -25,6 +29,7 @@ export interface CommunityState {
   activeRelay: 'primary' | 'failover';
   consecutiveFailures: number;
   firstSuccessSeen: boolean;
+  startupFailures: number;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
 }
 
@@ -70,6 +75,7 @@ export class CommunityRelayManager extends EventEmitter {
         activeRelay: 'primary',
         consecutiveFailures: 0,
         firstSuccessSeen: false,
+        startupFailures: 0,
         heartbeatTimer: null,
       });
 
@@ -121,7 +127,10 @@ export class CommunityRelayManager extends EventEmitter {
    * - If failover relay exists and active is primary → switch to failover
    * - Otherwise → emit community:offline
    *
-   * Startup transient grace: counter doesn't increment until first successful call.
+   * Startup grace: before the first successful call, failures are tracked
+   * separately in startupFailures. After failoverThreshold startup failures
+   * without any success, the grace period ends and failover triggers
+   * immediately (primary is genuinely unreachable).
    */
   async callApi<T>(
     communityName: string,
@@ -139,19 +148,35 @@ export class CommunityRelayManager extends EventEmitter {
         state.consecutiveFailures = 0;
         state.firstSuccessSeen = true;
       } else if (result.status === 0 || result.status >= 500) {
-        if (state.firstSuccessSeen) {
-          state.consecutiveFailures++;
-          this.checkFailover(state);
-        }
+        this.trackFailure(state);
       }
       // 4xx: no counter change
       return result;
     } catch (err) {
-      if (state.firstSuccessSeen) {
-        state.consecutiveFailures++;
+      this.trackFailure(state);
+      throw err;
+    }
+  }
+
+  /**
+   * Track a failure (network/server error or thrown exception).
+   *
+   * During startup grace (no success yet): count separately. After
+   * failoverThreshold startup failures, exit grace and trigger failover.
+   * After first success: count normally toward failover threshold.
+   */
+  private trackFailure(state: CommunityState): void {
+    if (state.firstSuccessSeen) {
+      state.consecutiveFailures++;
+      this.checkFailover(state);
+    } else {
+      state.startupFailures++;
+      if (state.startupFailures >= this.failoverThreshold) {
+        // Startup grace exhausted — primary is genuinely down
+        state.firstSuccessSeen = true;
+        state.consecutiveFailures = this.failoverThreshold;
         this.checkFailover(state);
       }
-      throw err;
     }
   }
 
