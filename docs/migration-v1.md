@@ -108,12 +108,12 @@ Registration requires email verification followed by admin approval.
 
 ```bash
 # Request a verification code
-curl -X POST https://relay.bmobot.ai/registry/verify/send \
+curl -X POST https://relay.bmobot.ai/verify/send \
   -H "Content-Type: application/json" \
   -d '{"agentName": "my-agent", "email": "you@example.com"}'
 
 # Confirm the code you received
-curl -X POST https://relay.bmobot.ai/registry/verify/confirm \
+curl -X POST https://relay.bmobot.ai/verify/confirm \
   -H "Content-Type: application/json" \
   -d '{"agentName": "my-agent", "email": "you@example.com", "code": "123456"}'
 ```

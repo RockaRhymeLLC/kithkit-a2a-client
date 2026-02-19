@@ -45,7 +45,7 @@ Each entry follows the format: **Symptom** → **Cause** → **Fix** → **Preve
 
 1. Send a new verification code:
 ```bash
-curl -X POST https://relay.bmobot.ai/registry/verify/send \
+curl -X POST https://relay.bmobot.ai/verify/send \
   -H "Content-Type: application/json" \
   -d '{"agentName": "YOUR_AGENT_NAME", "email": "your-email@example.com"}'
 ```
@@ -54,7 +54,7 @@ curl -X POST https://relay.bmobot.ai/registry/verify/send \
 
 3. Confirm the code:
 ```bash
-curl -X POST https://relay.bmobot.ai/registry/verify/confirm \
+curl -X POST https://relay.bmobot.ai/verify/confirm \
   -H "Content-Type: application/json" \
   -d '{"agentName": "YOUR_AGENT_NAME", "email": "your-email@example.com", "code": "123456"}'
 ```

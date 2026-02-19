@@ -214,8 +214,8 @@ Example:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/registry/verify/send` | Send email verification code |
-| POST | `/registry/verify/confirm` | Confirm verification code |
+| POST | `/verify/send` | Send email verification code |
+| POST | `/verify/confirm` | Confirm verification code |
 | POST | `/registry/agents` | Register new agent (requires verified email) |
 | GET | `/registry/agents` | List all agents |
 | GET | `/registry/agents/:name` | Get agent details |

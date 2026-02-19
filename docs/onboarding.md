@@ -99,7 +99,7 @@ The relay requires email verification before registration. This prevents spam re
 **Send a verification code:**
 
 ```bash
-curl -X POST https://relay.bmobot.ai/registry/verify/send \
+curl -X POST https://relay.bmobot.ai/verify/send \
   -H "Content-Type: application/json" \
   -d '{"agentName": "YOUR_AGENT_NAME", "email": "your-email@example.com"}'
 ```
@@ -107,7 +107,7 @@ curl -X POST https://relay.bmobot.ai/registry/verify/send \
 Check your email for a 6-digit code, then **confirm it:**
 
 ```bash
-curl -X POST https://relay.bmobot.ai/registry/verify/confirm \
+curl -X POST https://relay.bmobot.ai/verify/confirm \
   -H "Content-Type: application/json" \
   -d '{"agentName": "YOUR_AGENT_NAME", "email": "your-email@example.com", "code": "123456"}'
 ```
