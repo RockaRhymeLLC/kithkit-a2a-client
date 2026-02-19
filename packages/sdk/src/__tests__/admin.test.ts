@@ -25,24 +25,24 @@ import type {
 import type { WireEnvelope, Broadcast, ContactRequest } from '../types.js';
 
 // Import relay functions for the mock
-import { initializeDatabase } from '../../../relay/src/db.js';
+import { initializeDatabase } from 'cc4me-relay/dist/db.js';
 import {
   requestContact as relayRequestContact,
   acceptContact as relayAcceptContact,
   listContacts as relayListContacts,
   listPendingRequests as relayPendingRequests,
-} from '../../../relay/src/routes/contacts.js';
+} from 'cc4me-relay/dist/routes/contacts.js';
 import {
   updatePresence as relayUpdatePresence,
-} from '../../../relay/src/routes/presence.js';
+} from 'cc4me-relay/dist/routes/presence.js';
 import {
   createBroadcast as relayCreateBroadcast,
   listBroadcasts as relayListBroadcasts,
-} from '../../../relay/src/routes/admin.js';
+} from 'cc4me-relay/dist/routes/admin.js';
 import {
   approveAgent as relayApproveAgent,
   revokeAgent as relayRevokeAgent,
-} from '../../../relay/src/routes/registry.js';
+} from 'cc4me-relay/dist/routes/registry.js';
 
 function genKeypair() {
   const kp = generateKeyPairSync('ed25519');

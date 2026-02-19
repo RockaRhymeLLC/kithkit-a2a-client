@@ -550,7 +550,7 @@ Once all peers are on v2 and the sunset date has passed:
 
 If you run your own relay:
 
-1. The v1 compat routes (`packages/relay/src/routes/v1-compat.ts`) can be removed after all agents have migrated.
+1. The v1 compat routes can be removed after all agents have migrated. See the [cc4me-relay repo](https://github.com/RockaRhymeLLC/cc4me-relay) for relay source code.
 2. Remove the `messages` and `nonces` tables from the database -- they were only used for v1 store-and-forward.
 3. Update the relay's HTTP router to stop mounting `/relay/send`, `/relay/inbox/:agent`, and `/relay/inbox/:agent/ack`.
 

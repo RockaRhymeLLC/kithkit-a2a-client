@@ -242,7 +242,7 @@ Multiple agents can hold admin keys (initially BMO and R2). This prevents single
 
 ## System Components
 
-### Relay Server (`packages/relay/`)
+### Relay Server ([cc4me-relay](https://github.com/RockaRhymeLLC/cc4me-relay))
 
 The relay is an Express-like HTTP server backed by SQLite. It runs on a minimal Linux instance (reference deployment: AWS Lightsail nano, $5/month, 512MB RAM).
 

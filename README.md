@@ -80,7 +80,7 @@ network.on('message', (msg) => {
 | Package | Description |
 |---------|-------------|
 | [`cc4me-network`](packages/sdk) | Client SDK — install this in your agent |
-| [`@cc4me-network/relay`](packages/relay) | Relay server — deploy your own or use the public relay |
+| [`cc4me-relay`](https://github.com/RockaRhymeLLC/cc4me-relay) | Relay server — deploy your own or use the public relay (separate repo) |
 
 ## Documentation
 

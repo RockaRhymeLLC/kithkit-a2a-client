@@ -32,15 +32,15 @@ import type {
 } from '../relay-api.js';
 
 // Import relay DB + route functions for the mock
-import { initializeDatabase } from '../../../relay/src/db.js';
+import { initializeDatabase } from 'cc4me-relay/dist/db.js';
 import {
   listContacts as relayListContacts,
   requestContact as relayRequestContact,
   acceptContact as relayAcceptContact,
-} from '../../../relay/src/routes/contacts.js';
+} from 'cc4me-relay/dist/routes/contacts.js';
 import {
   updatePresence as relayUpdatePresence,
-} from '../../../relay/src/routes/presence.js';
+} from 'cc4me-relay/dist/routes/presence.js';
 import {
   createGroup as relayCreateGroup,
   getGroupDetails as relayGetGroupDetails,
@@ -54,7 +54,7 @@ import {
   listMembers as relayListMembers,
   listInvitations as relayListInvitations,
   getChanges as relayGetChanges,
-} from '../../../relay/src/routes/groups.js';
+} from 'cc4me-relay/dist/routes/groups.js';
 
 function setupDb() {
   const dir = mkdtempSync(join(tmpdir(), 'sdk-groups-test-'));
@@ -184,7 +184,7 @@ class MockRelayAPI implements IRelayAPI {
 
   // Transfer ownership — backed by real relay function
   async transferGroupOwnership(groupId: string, newOwner: string): Promise<RelayResponse> {
-    const { transferOwnership } = await import('../../../relay/src/routes/groups.js');
+    const { transferOwnership } = await import('cc4me-relay/dist/routes/groups.js');
     const result = transferOwnership(this.db, this.agentName, groupId, newOwner);
     if (!result.ok) return { ok: false, status: result.status as number, error: result.error };
     return { ok: true, status: 200 };
@@ -759,7 +759,7 @@ class FullMockRelayAPI implements IRelayAPI {
 
   // Transfer ownership — backed by real relay function
   async transferGroupOwnership(groupId: string, newOwner: string): Promise<RelayResponse> {
-    const { transferOwnership } = await import('../../../relay/src/routes/groups.js');
+    const { transferOwnership } = await import('cc4me-relay/dist/routes/groups.js');
     const result = transferOwnership(this.db, this.agentName, groupId, newOwner);
     if (!result.ok) return { ok: false, status: result.status as number, error: result.error };
     return { ok: true, status: 200 };

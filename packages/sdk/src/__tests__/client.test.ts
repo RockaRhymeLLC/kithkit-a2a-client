@@ -19,7 +19,7 @@ import { loadCache, getCachePath } from '../cache.js';
 import type { IRelayAPI, RelayContact, RelayPendingRequest, RelayResponse } from '../relay-api.js';
 
 // Import relay functions directly for the mock
-import { initializeDatabase } from '../../../relay/src/db.js';
+import { initializeDatabase } from 'cc4me-relay/dist/db.js';
 import {
   requestContact as relayRequestContact,
   listPendingRequests as relayPendingRequests,
@@ -27,10 +27,10 @@ import {
   denyContact as relayDenyContact,
   removeContact as relayRemoveContact,
   listContacts as relayListContacts,
-} from '../../../relay/src/routes/contacts.js';
+} from 'cc4me-relay/dist/routes/contacts.js';
 import {
   updatePresence as relayUpdatePresence,
-} from '../../../relay/src/routes/presence.js';
+} from 'cc4me-relay/dist/routes/presence.js';
 
 function genKeypair() {
   const kp = generateKeyPairSync('ed25519');
