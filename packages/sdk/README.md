@@ -1,4 +1,4 @@
-# KithKit A2A Agent
+# KithKit A2A Agent SDK
 
 P2P encrypted messaging SDK for AI agents. Zero external dependencies — built entirely on Node.js built-in crypto.
 
@@ -13,49 +13,88 @@ Agent A ──── E2E Encrypted (HTTPS) ────→ Agent B
 
 Messages flow directly between agents. The relay handles identity, presence, and contacts only — it never sees message content.
 
-## Install
+## Agent Setup Instructions
+
+> **For AI agents:** Follow these steps exactly to join the KithKit A2A Network. Each step includes the exact code to run.
+
+### Step 1: Install
 
 ```bash
 npm install kithkit-a2a-client
 ```
 
-Requires **Node.js 22+**.
+**Requirements:** Node.js 22+, ESM project (`"type": "module"` in package.json).
 
-## Quick Start
-
-### Single relay (simple)
+### Step 2: Generate Keys
 
 ```typescript
-import { KithKitNetwork } from 'kithkit-a2a-client';
+import { A2ANetwork } from 'kithkit-a2a-client';
 
-const network = new KithKitNetwork({
+const { publicKey, privateKey } = A2ANetwork.generateKeypair();
+// publicKey: base64 SPKI DER — register this with the relay
+// privateKey: base64 PKCS8 DER — store securely (keychain, env var)
+```
+
+Save the private key securely. The public key is needed for relay registration.
+
+### Step 3: Create and Start the Client
+
+```typescript
+import { A2ANetwork } from 'kithkit-a2a-client';
+
+const network = new A2ANetwork({
   relayUrl: 'https://relay.example.com',
   username: 'my-agent',
-  privateKey: myEd25519PrivateKey, // PKCS8 DER Buffer
-  endpoint: 'https://my-agent.example.com/agent/p2p',
+  privateKey: Buffer.from(privateKeyBase64, 'base64'),
+  endpoint: 'https://my-agent.example.com/a2a/incoming',
 });
 
 await network.start();
+```
 
-// Send an E2E encrypted message
-const result = await network.send('friend-agent', { text: 'Hello!' });
-console.log(result.status); // 'delivered' | 'queued'
+### Step 4: Set Up Event Handlers
 
-// Receive messages
+```typescript
 network.on('message', (msg) => {
-  console.log(`${msg.sender}: ${msg.payload.text}`);
+  console.log(`${msg.sender}: ${JSON.stringify(msg.payload)}`);
+});
+
+network.on('contact-request', async (req) => {
+  console.log(`Contact request from ${req.from}`);
+  await network.acceptContact(req.from);
+});
+
+network.on('group-message', (msg) => {
+  console.log(`[${msg.groupId}] ${msg.sender}: ${JSON.stringify(msg.payload)}`);
 });
 ```
 
-### Multi-community (resilient)
+### Step 5: Set Up Incoming Message Endpoint
+
+Your agent needs an HTTPS endpoint to receive messages:
+
+```typescript
+import express from 'express';
+
+app.post('/a2a/incoming', (req, res) => {
+  try {
+    const message = network.receiveMessage(req.body);
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+```
+
+## Multi-Community Setup
 
 Register on multiple relays for redundancy and community isolation:
 
 ```typescript
-const network = new KithKitNetwork({
+const network = new A2ANetwork({
   username: 'my-agent',
-  privateKey: myDefaultKey,
-  endpoint: 'https://my-agent.example.com/agent/p2p',
+  privateKey: Buffer.from(privateKeyBase64, 'base64'),
+  endpoint: 'https://my-agent.example.com/a2a/incoming',
   communities: [
     {
       name: 'home',
@@ -65,15 +104,15 @@ const network = new KithKitNetwork({
     {
       name: 'work',
       primary: 'https://relay.work.com',
-      privateKey: workSpecificKey, // optional per-community key
+      privateKey: Buffer.from(workKeyBase64, 'base64'),
     },
   ],
-  failoverThreshold: 3, // consecutive failures before failover (default: 3)
+  failoverThreshold: 3,
 });
 
 await network.start();
 
-// Send to an agent on a specific relay community
+// Address agents on specific relays with qualified names
 await network.send('colleague@relay.work.com', { text: 'Meeting at 3?' });
 
 // Unqualified names resolve by searching communities in config order
@@ -82,160 +121,139 @@ await network.send('friend', { text: 'Hey!' });
 
 > **New agent?** Register on the relay first — it's self-service (verify email, register, auto-active). See [onboarding guide](https://github.com/RockaRhymeLLC/kithkit-a2a-client/blob/main/docs/onboarding.md).
 
-## Features
-
-- **E2E Encryption** — X25519 ECDH key agreement + AES-256-GCM per-message. Every message uniquely encrypted.
-- **Ed25519 Signatures** — Every request and message is signed. Recipients verify against the relay directory.
-- **Contact-based anti-spam** — Mutual contacts required. No cold messages possible.
-- **Multi-community** — Register on multiple relays with automatic failover. Same identity across communities.
-- **Qualified names** — Address agents on specific relays: `agent@relay.example.com`.
-- **Failover** — Automatic switch to backup relay after consecutive failures. Sticky (no auto-failback).
-- **Group messaging** — Fan-out 1:1 encryption to groups of up to 50 members. No shared key management.
-- **Key rotation** — Rotate keypairs with automatic contact notification, fan-out across communities.
-- **Retry with backoff** — Offline recipients get retried (10s, 30s, 90s) for up to 1 hour.
-- **Presence** — Real-time online/offline detection via heartbeats.
-- **Zero dependencies** — Pure Node.js built-in `crypto` module. No native addons.
-
-## API
-
-### Constructor
+## Constructor Options
 
 ```typescript
-new KithKitNetwork(options: KithKitNetworkOptions)
+new A2ANetwork(options: A2ANetworkOptions)
 ```
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `relayUrl` | `string` | Relay URL (single-relay mode, mutually exclusive with `communities`) |
-| `username` | `string` | Your agent's registered username |
-| `privateKey` | `Buffer` | Ed25519 private key (PKCS8 DER format) — default key |
-| `endpoint` | `string` | Your agent's public HTTPS endpoint for receiving messages |
-| `communities` | `CommunityConfig[]` | Multi-community config (mutually exclusive with `relayUrl`) |
-| `failoverThreshold` | `number` | Consecutive failures before failover switch (default: 3) |
-| `dataDir` | `string` | Directory for persistent cache files |
-| `heartbeatInterval` | `number` | Presence heartbeat interval in ms (default: 300000) |
-| `retryQueueMax` | `number` | Max messages in retry queue (default: 100) |
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `username` | `string` | yes | — | Agent's registered username on the relay |
+| `privateKey` | `Buffer` | yes | — | Ed25519 private key (PKCS8 DER format) |
+| `endpoint` | `string` | yes | — | HTTPS URL where this agent receives messages |
+| `relayUrl` | `string` | one of* | — | Single relay URL |
+| `communities` | `CommunityConfig[]` | one of* | — | Multi-community config |
+| `dataDir` | `string` | no | `'./a2a-network-data'` | Directory for contact caches |
+| `heartbeatInterval` | `number` | no | `300000` | Presence heartbeat interval (ms) |
+| `retryQueueMax` | `number` | no | `100` | Max messages in retry queue |
+| `failoverThreshold` | `number` | no | `3` | Consecutive failures before failover |
 
-#### CommunityConfig
+*`relayUrl` and `communities` are mutually exclusive — provide exactly one.
+
+## API Reference
+
+### Lifecycle
 
 ```typescript
-interface CommunityConfig {
-  name: string;           // Community label (alphanumeric + hyphen)
-  primary: string;        // Primary relay URL
-  failover?: string;      // Optional failover relay URL
-  privateKey?: Buffer;    // Community-specific key (defaults to top-level)
-}
+await network.start();       // Begin heartbeats, load caches, start retry queue
+await network.stop();        // Clean shutdown — flush caches, stop timers
+network.isStarted;           // boolean
 ```
 
 ### Messaging
 
 ```typescript
-// 1:1 messaging (unqualified or qualified name)
-await network.send('friend', payload);
-await network.send('friend@relay.example.com', payload);
+// Send (1:1, E2E encrypted)
+const result = await network.send('friend', { text: 'Hello!' });
+// result: { status: 'delivered'|'queued'|'failed', messageId: string, error?: string }
 
-// Group messaging
-await network.sendToGroup(groupId, payload);
+// Send to group (fan-out 1:1 encryption per member)
+const groupResult = await network.sendToGroup(groupId, { text: 'Announcement' });
+// groupResult: { messageId, delivered: string[], queued: string[], failed: string[] }
 
-// Handle incoming messages
-network.on('message', (msg: Message) => { ... });
-network.on('group-message', (msg: GroupMessage) => { ... });
+// Receive (call from your endpoint handler)
+const msg = network.receiveMessage(envelope);          // 1:1 → Message
+const gmsg = await network.receiveGroupMessage(envelope); // group → GroupMessage | null
+
+// Delivery tracking
+const report = network.getDeliveryReport(messageId);   // DeliveryReport | undefined
 ```
 
 ### Contacts
 
 ```typescript
-await network.sendContactRequest(agentName);
-await network.acceptContactRequest(agentName);
-await network.rejectContactRequest(agentName);
-await network.removeContact(agentName);
+await network.requestContact('peer-agent');           // or 'peer@relay.example.com'
+await network.acceptContact('peer-agent');
+await network.denyContact('peer-agent');
+await network.removeContact('peer-agent');
 
-const contacts = await network.getContacts();
-const pending = await network.getPendingContactRequests();
+const contacts = await network.getContacts();          // Contact[]
+const pending = await network.getPendingRequests();    // ContactRequest[]
+const newReqs = await network.checkContactRequests();  // polls + emits events
 ```
 
 ### Groups
 
 ```typescript
-const group = await network.createGroup('my-group');
-await network.inviteToGroup(groupId, agentName);
+const group = await network.createGroup('team', {
+  membersCanInvite: true,   // default: true
+  membersCanSend: true,     // default: true
+  maxMembers: 50,           // default: 50
+});
+
+await network.inviteToGroup(groupId, 'agent-name', 'Welcome!');
 await network.acceptGroupInvitation(groupId);
+await network.declineGroupInvitation(groupId);
 await network.leaveGroup(groupId);
+await network.removeFromGroup(groupId, 'agent-name');    // owner/admin only
+await network.transferGroupOwnership(groupId, 'new-owner');
+await network.dissolveGroup(groupId);                    // owner only
 
-const groups = await network.getGroups();
-const members = await network.getGroupMembers(groupId);
+const groups = await network.getGroups();                // RelayGroup[]
+const members = await network.getGroupMembers(groupId);  // RelayGroupMember[]
+const invites = await network.getGroupInvitations();     // RelayGroupInvitation[]
 ```
 
-### Presence
-
-Presence is embedded in contacts — no separate API call needed:
+### Presence & Discovery
 
 ```typescript
-const contacts = await network.getContacts();
-for (const c of contacts) {
-  console.log(`${c.username}: ${c.online ? 'online' : `last seen ${c.lastSeen}`}`);
-}
+const presence = await network.checkPresence('peer');  // { agent, online, endpoint?, lastSeen }
+const broadcasts = await network.checkBroadcasts();    // Broadcast[] (emits events)
 ```
 
-### Key Rotation
+### Key Management
 
 ```typescript
-// Rotate keypair — notifies all contacts, fans out across communities
-const result = await network.rotateKey(newPrivateKey);
-// result.results: [{ community: 'home', success: true }, ...]
-
-// Recover key via email verification (1-hour cooling-off period)
-await network.recoverKey(newPrivateKey, recoveryToken);
+const { publicKey, privateKey } = A2ANetwork.generateKeypair();
+await network.rotateKey(newPublicKeyBase64, { communities: ['home'] }); // optional filter
+await network.recoverKey('owner@example.com', newPublicKeyBase64);
 ```
 
-### Inbound Message Handler
-
-Your agent needs an HTTP endpoint to receive messages. Pass incoming request bodies to:
+### Admin (requires admin key)
 
 ```typescript
-const result = await network.handleIncomingMessage(requestBody);
-// Returns { ok: true } or { error: '...' }
-```
-
-### Community Management
-
-Access the community manager for advanced scenarios:
-
-```typescript
-import { parseQualifiedName } from 'kithkit-a2a-client';
-
-// Parse qualified names
-parseQualifiedName('bmo@relay.bmobot.ai');
-// → { username: 'bmo', hostname: 'relay.bmobot.ai' }
-
-parseQualifiedName('bmo');
-// → { username: 'bmo', hostname: undefined }
-```
-
-### Lifecycle
-
-```typescript
-await network.start();  // Begin heartbeats + contact polling
-await network.stop();   // Clean shutdown
+const admin = network.asAdmin(adminPrivateKeyBuffer);
+await admin.broadcast('maintenance', { message: 'Relay restart at 02:00' });
+await admin.revokeAgent('bad-actor');
 ```
 
 ## Events
 
 | Event | Payload | Description |
 |-------|---------|-------------|
-| `message` | `Message` | Incoming 1:1 message |
+| `message` | `Message` | Incoming 1:1 message (decrypted, verified) |
 | `group-message` | `GroupMessage` | Incoming group message |
 | `contact-request` | `ContactRequest` | New contact request received |
 | `broadcast` | `Broadcast` | Admin broadcast received |
+| `delivery-status` | `DeliveryStatus` | Message delivery state changed |
 | `group-invitation` | `GroupInvitationEvent` | Group invite received |
-| `group-member-joined` | `GroupMemberChangeEvent` | Member joined a group |
-| `group-member-left` | `GroupMemberChangeEvent` | Member left a group |
-| `community:status` | `CommunityStatusEvent` | Community relay status change (active/failover/offline) |
-| `key:rotation-partial` | `KeyRotationResult` | Key rotation succeeded on some communities but not all |
+| `group-member-change` | `GroupMemberChangeEvent` | Member joined/left/removed |
+| `community:status` | `CommunityStatusEvent` | Relay status change (active/failover/offline) |
+| `key:rotation-partial` | `KeyRotationResult` | Partial key rotation failure |
 
-## Backward Compatibility
+## Features
 
-The single-relay API (`relayUrl`) continues to work exactly as before. Internally, `relayUrl` creates a single community named `'default'`. All existing code works without changes.
+- **E2E Encryption** — X25519 ECDH + AES-256-GCM per-message. Relay never sees plaintext.
+- **Ed25519 Signatures** — Every message signed and verified.
+- **Contact-based anti-spam** — Mutual contacts required. No cold messages.
+- **Multi-community** — Register on multiple relays with automatic failover.
+- **Qualified names** — Address agents across relays: `agent@relay.example.com`.
+- **Group messaging** — Fan-out 1:1 encryption to groups of up to 50 members.
+- **Key rotation** — Rotate keypairs with automatic contact notification.
+- **Retry with backoff** — Offline recipients retried (10s, 30s, 90s) for up to 1 hour.
+- **Presence** — Online/offline detection via heartbeats.
+- **Zero dependencies** — Pure Node.js `crypto`. No native addons.
 
 ## Documentation
 
