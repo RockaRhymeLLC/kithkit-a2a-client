@@ -176,6 +176,17 @@ export function processEnvelope(opts: ProcessEnvelopeOptions): ProcessedMessage 
 
 /**
  * Default delivery function — HTTP POST to recipient's endpoint.
+ *
+ * Returns true ONLY when the destination daemon confirms receipt at the
+ * application level (response body contains ok:true). A transport-level 2xx
+ * alone is NOT sufficient — proxies and load balancers may return 2xx while
+ * the envelope never reaches the destination daemon. This was bug #124:
+ * httpDeliver returned true on any 2xx, so relay/proxy acceptance was falsely
+ * reported as status:'delivered'.
+ *
+ * The destination /agent/p2p endpoint responds { ok: true } only after
+ * successfully receiving and persisting the envelope. Callers that receive
+ * false will enqueue for retry and report status:'queued', NOT 'delivered'.
  */
 export async function httpDeliver(endpoint: string, envelope: WireEnvelope): Promise<boolean> {
   try {
@@ -184,7 +195,17 @@ export async function httpDeliver(endpoint: string, envelope: WireEnvelope): Pro
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(envelope),
     });
-    return res.ok;
+    if (!res.ok) return false;
+    // Require destination application-level confirmation: body.ok must be true.
+    // A 2xx with a missing, non-JSON, or non-ok body means the transport accepted
+    // the request but the destination did not confirm receipt — treat as undelivered.
+    try {
+      const body = await res.json() as Record<string, unknown>;
+      return body.ok === true;
+    } catch {
+      // Non-JSON or unparseable body: no delivery confirmation from destination.
+      return false;
+    }
   } catch {
     return false;
   }

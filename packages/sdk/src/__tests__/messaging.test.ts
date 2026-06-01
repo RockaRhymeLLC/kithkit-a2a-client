@@ -7,7 +7,7 @@
  * Uses MockRelayAPI + injectable deliverFn for full integration without HTTP.
  */
 
-import { describe, it, afterEach } from 'node:test';
+import { describe, it, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { A2ANetwork, type A2ANetworkInternalOptions } from '../client.js';
 import type { IRelayAPI, RelayContact, RelayPendingRequest, RelayResponse } from '../relay-api.js';
 import type { WireEnvelope, Message, DeliveryStatus } from '../types.js';
+import { httpDeliver } from '../messaging.js';
 
 // Import relay functions directly for the mock
 import { initializeDatabase } from 'kithkit-a2a-relay/dist/db.js';
@@ -699,5 +700,129 @@ describe('t-064: SDK presence-gated: offline → queued → retry → delivered'
     // Should see 'pending' immediately from the enqueue
     assert.ok(statuses.length >= 1);
     assert.equal(statuses[0]!.status, 'pending');
+  });
+});
+
+// ================================================================
+// t-065: httpDeliver — application-level confirmation required (#124)
+//
+// Regression guard: httpDeliver must return true ONLY when the destination
+// responds 200 AND the response body contains ok:true. Any other 2xx (with
+// wrong/missing/non-JSON body) must return false so send() honestly enqueues
+// and reports status:'queued', NOT status:'delivered'.
+// ================================================================
+
+/** Minimal valid envelope shape for httpDeliver unit tests. */
+const DUMMY_ENVELOPE: WireEnvelope = {
+  version: '2.0',
+  type: 'direct',
+  messageId: 'test-deliver-124',
+  sender: 'alice',
+  recipient: 'bob',
+  timestamp: new Date().toISOString(),
+  payload: { ciphertext: 'abc', nonce: 'xyz' },
+  signature: 'sig',
+};
+
+describe('t-065: httpDeliver application-level confirmation (fix #124)', () => {
+  afterEach(() => {
+    mock.restoreAll();
+  });
+
+  it('returns true when destination responds 200 {ok:true} — confirmed delivery', async () => {
+    mock.method(globalThis, 'fetch', async () => ({
+      ok: true,
+      json: async () => ({ ok: true }),
+    }));
+    const result = await httpDeliver('https://example.com/agent/p2p', DUMMY_ENVELOPE);
+    assert.equal(result, true);
+  });
+
+  it('returns false when 200 but body lacks ok:true ({accepted:true}) — regression guard for #124', async () => {
+    // This is the exact bug: a proxy/relay returned 200 {accepted:true} and
+    // the old code reported 'delivered'. The new code must return false here.
+    mock.method(globalThis, 'fetch', async () => ({
+      ok: true,
+      json: async () => ({ accepted: true }),
+    }));
+    const result = await httpDeliver('https://example.com/agent/p2p', DUMMY_ENVELOPE);
+    assert.equal(result, false, '200 with {accepted:true} must NOT be treated as delivered');
+  });
+
+  it('returns false when 200 but body is empty object {}', async () => {
+    mock.method(globalThis, 'fetch', async () => ({
+      ok: true,
+      json: async () => ({}),
+    }));
+    const result = await httpDeliver('https://example.com/agent/p2p', DUMMY_ENVELOPE);
+    assert.equal(result, false);
+  });
+
+  it('returns false when 2xx but body is non-JSON / throws on parse', async () => {
+    mock.method(globalThis, 'fetch', async () => ({
+      ok: true,
+      json: async () => { throw new SyntaxError('Unexpected end of JSON input'); },
+    }));
+    const result = await httpDeliver('https://example.com/agent/p2p', DUMMY_ENVELOPE);
+    assert.equal(result, false);
+  });
+
+  it('returns false on 500 server error', async () => {
+    mock.method(globalThis, 'fetch', async () => ({
+      ok: false,
+      status: 500,
+      json: async () => ({ ok: true }), // body.ok:true is irrelevant if transport failed
+    }));
+    const result = await httpDeliver('https://example.com/agent/p2p', DUMMY_ENVELOPE);
+    assert.equal(result, false);
+  });
+
+  it('returns false on 400 bad request', async () => {
+    mock.method(globalThis, 'fetch', async () => ({
+      ok: false,
+      status: 400,
+      json: async () => ({}),
+    }));
+    const result = await httpDeliver('https://example.com/agent/p2p', DUMMY_ENVELOPE);
+    assert.equal(result, false);
+  });
+
+  it('returns false when fetch throws (network error / ECONNREFUSED)', async () => {
+    mock.method(globalThis, 'fetch', async () => {
+      throw new Error('fetch failed: ECONNREFUSED');
+    });
+    const result = await httpDeliver('https://example.com/agent/p2p', DUMMY_ENVELOPE);
+    assert.equal(result, false);
+  });
+
+  it('send() yields status:queued (not delivered) when httpDeliver-equivalent returns false — integration guard', async () => {
+    // Uses an injectable deliverFn that simulates "200 without body.ok:true".
+    // Validates the send() → deliverFn=false → queued path end-to-end.
+    const env = setupTestEnv();
+    const bob = createNetworkClient(env, 'bob');
+
+    // This deliverFn returns false (as httpDeliver now would for 200 without ok:true)
+    const noConfirmDeliverFn = async (_ep: string, _env: WireEnvelope): Promise<boolean> => false;
+    const alice = createNetworkClient(env, 'alice', noConfirmDeliverFn, [100000], 100000);
+
+    const cleanupFn = async () => {
+      try { await alice.stop(); } catch { /* ignore */ }
+      try { await bob.stop(); } catch { /* ignore */ }
+      rmSync(env.dir, { recursive: true, force: true });
+    };
+
+    try {
+      await alice.start();
+      await bob.start();
+      await establishContacts(alice, bob);
+
+      const result = await alice.send('bob', { text: 'Will this arrive?' });
+      // Delivery was not confirmed (deliverFn returned false) — must be queued, not delivered
+      assert.notEqual(result.status, 'delivered', 'Must NOT report delivered when destination did not confirm');
+      assert.ok(result.status === 'queued' || result.status === 'failed',
+        `Expected queued or failed, got: ${result.status}`);
+    } finally {
+      await cleanupFn();
+    }
   });
 });
